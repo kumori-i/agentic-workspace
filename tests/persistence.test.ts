@@ -22,6 +22,7 @@ function liveSnapshot(directory: string): WorkspaceSnapshot {
     ...snapshot.tasks[0], runtime: 'codex', status: 'interrupted',
     threadId: 'thread:001', turnId: 'turn-001', model: 'gpt-a', error: 'Interrupted on close.',
     pendingPrompt: 'Continue with the requested revision.',
+    revisionBrief: 'Continue with the requested revision.',
     worktree: { path: join(directory, 'task-worktree'), repositoryPath: directory,
       branch: 'codex/task-001', baseCommit: 'a'.repeat(40), createdAt: new Date().toISOString() },
     jobs: [{ id: 'task-1-codex', agentId: 'backend', title: 'Codex implementation', status: 'cancelled', progress: 0, dependsOn: [] }],
@@ -185,5 +186,46 @@ describe('workspace persistence', () => {
   it('ignores pending approval data from prior sessions even when the data is malformed', () => {
     const snapshot = liveSnapshot(directory);
     expect(parseWorkspaceSnapshot({ ...snapshot, approvals: 'stale-session-request' })).not.toHaveProperty('approvals');
+  });
+
+  function handoffSnapshot() {
+    const snapshot = liveSnapshot(directory); const task = snapshot.tasks[0];
+    task.status = 'review'; task.jobs[0].status = 'completed';
+    task.jobs.push({ id: 'task-quinn-review', agentId: 'qa', title: 'Independent review', status: 'completed', progress: 0, dependsOn: [task.jobs[0].id] });
+    task.review = { status: 'approved', checkpoint: { head: 'a'.repeat(40), tree: 'b'.repeat(40) }, threadId: 'quinn:001', turnId: 'review:001', summary: 'Actual fixture review.', findings: [], checks: ['Fixture inspection.'], completedAt: new Date().toISOString() };
+    task.publication = { phase: 'prepared', plan: { id: 'publication-00000000-0000-0000-0000-000000000001', taskBranch: task.worktree!.branch, taskHead: 'a'.repeat(40), tree: 'b'.repeat(40), targetBranch: 'main', targetHead: 'a'.repeat(40), remote: 'origin', remoteFingerprint: 'c'.repeat(64), commitMessage: 'Reviewed change' } };
+    return snapshot;
+  }
+
+  it('round trips independent review and partial Git handoff records and removes unknown nested fields', async () => {
+    const snapshot = handoffSnapshot();
+    snapshot.tasks[0].publication = { ...snapshot.tasks[0].publication!, phase: 'failed', taskCommit: 'd'.repeat(40), mergeCommit: 'e'.repeat(40), merged: true, error: 'Remote rejected push.' };
+    await writeWorkspaceState(statePath, snapshot);
+    expect((await readWorkspaceState(statePath)).snapshot!.tasks[0]).toEqual(snapshot.tasks[0]);
+    const untrusted = structuredClone(snapshot) as any;
+    untrusted.tasks[0].review.token = 'secret-review';
+    untrusted.tasks[0].review.checkpoint.credential = 'secret-checkpoint';
+    untrusted.tasks[0].publication.secret = 'secret-publication';
+    untrusted.tasks[0].publication.plan.remoteUrl = 'https://secret-credential@example.invalid';
+    const sanitized = parseWorkspaceSnapshot(untrusted)!;
+    await writeWorkspaceState(statePath, sanitized);
+    expect(await readFile(statePath, 'utf8')).not.toContain('secret-');
+  });
+
+  it('rejects approval without independent identity and publication not bound to that review', () => {
+    const valid = handoffSnapshot();
+    expect(parseWorkspaceSnapshot(valid)).not.toBeNull();
+    for (const mutate of [
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].review!.threadId = snapshot.tasks[0].threadId; },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].review!.turnId = undefined; },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].publication!.plan.tree = 'e'.repeat(40); },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].publication!.plan.remoteFingerprint = 'invalid'; },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].publication!.plan.taskBranch = 'other-branch'; },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].publication!.phase = 'published'; },
+      (snapshot: WorkspaceSnapshot) => { snapshot.tasks[0].jobs[1].dependsOn = []; },
+    ]) {
+      const invalid = structuredClone(valid); mutate(invalid);
+      expect(parseWorkspaceSnapshot(invalid)).toBeNull();
+    }
   });
 });

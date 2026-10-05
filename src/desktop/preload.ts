@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopInfo, WorkspaceBridge, WorkspaceSnapshot, WorktreeInspection } from '../shared/types';
+import type { DesktopInfo, PublicationTargets, WorkspaceBridge, WorkspaceSnapshot, WorktreeInspection } from '../shared/types';
 
 const bridge: WorkspaceBridge = {
   getSnapshot: () => ipcRenderer.invoke('workspace:getSnapshot') as Promise<WorkspaceSnapshot>,
@@ -18,6 +18,10 @@ const bridge: WorkspaceBridge = {
   respondToApproval: (approvalId, accept) => ipcRenderer.invoke('workspace:respondToApproval', approvalId, accept) as Promise<WorkspaceSnapshot>,
   inspectTask: (taskId) => ipcRenderer.invoke('workspace:inspectTask', taskId) as Promise<WorktreeInspection>,
   openWorktree: (taskId) => ipcRenderer.invoke('workspace:openWorktree', taskId) as Promise<void>,
+  reviewTask: (taskId) => ipcRenderer.invoke('workspace:reviewTask', taskId) as Promise<WorkspaceSnapshot>,
+  getPublicationTargets: (taskId) => ipcRenderer.invoke('workspace:getPublicationTargets', taskId) as Promise<PublicationTargets>,
+  preparePublication: (taskId, remote, commitMessage) => ipcRenderer.invoke('workspace:preparePublication', taskId, remote, commitMessage) as Promise<WorkspaceSnapshot>,
+  confirmPublication: (taskId, planId) => ipcRenderer.invoke('workspace:confirmPublication', taskId, planId) as Promise<WorkspaceSnapshot>,
   onSnapshot: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('A snapshot listener must be a function.');
     const listener = (_event: Electron.IpcRendererEvent, snapshot: WorkspaceSnapshot) => callback(snapshot);

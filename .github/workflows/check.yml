@@ -26,4 +26,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-preview
-          path: ${{ runner.temp }}/office-preview.png
+          path: |
+            ${{ runner.temp }}/office-preview.png
+            ${{ runner.temp }}/handoff-preview.png

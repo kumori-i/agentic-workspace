@@ -111,3 +111,38 @@ textarea:focus-visible, select:focus-visible, pre:focus-visible { outline: 2px s
 .inspection-error, .dialog-error { font-size: 11px; color: #edc09a; line-height: 1.6; background: #463328; padding: 11px; border-radius: 5px; margin-bottom: 14px; overflow-wrap: anywhere; }
 @media (max-width: 1250px) { .runtime-strip, .approval-section { margin-left: 21px; margin-right: 21px; } .mode-switch button { padding: 6px 8px; } .topbar-actions { gap: 7px; } .worktree-actions { gap: 4px 6px; } }
 @media (prefers-reduced-motion: reduce) { .connection-dot.connecting { animation: none; } }
+.badge.reviewing { background: #44394e; color: #ceb9e2; }
+.badge.publishing { background: #38472e; color: #c4d9a2; }
+.status-dot.reviewing { background: #b49ecb; }
+.status-dot.publishing { background: #bed898; }
+.review-receipt { margin-top: 13px; padding: 11px; border: 1px solid #5d526b; border-radius: 5px; background: #2a2931; }
+.review-receipt.approved { border-color: #576d48; background: #273324; }
+.review-receipt .section-heading { gap: 8px; font-size: 9px; align-items: flex-start; }
+.review-receipt .section-heading strong { font-weight: 550; }
+.review-receipt .section-heading>span { text-align: right; color: #c9c2d4; }
+.review-receipt>p, .review-receipt li { margin-top: 7px; color: #bfc5b3; font-size: 10px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-receipt details { margin-top: 8px; color: #bab4c8; font-size: 10px; }
+.review-receipt summary { cursor: pointer; }
+.review-receipt ul { padding-left: 17px; margin: 5px 0; }
+.review-checkpoint { display: block; color: #879c83; font-size: 9px; margin-top: 10px; }
+.review-checkpoint code { margin-left: 5px; }
+.review-again { display: block; margin-top: 8px; }
+.git-receipt { margin-top: 12px; padding: 11px; border-radius: 5px; background: #1b2a20; border: 1px solid #526448; display: grid; gap: 6px; }
+.git-receipt strong { color: #c5d7ae; font-size: 10px; font-weight: 550; }
+.git-receipt>span { color: #9bad92; font-size: 9px; overflow-wrap: anywhere; }
+.git-receipt p { color: #d3ae8c; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.handoff-explanation { color: #94aa8d; font-size: 11px; line-height: 1.6; margin-top: 8px; }
+.handoff-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+.handoff-actions button { font-size: 11px; }
+.handoff-actions .text-button { display: flex; align-items: center; gap: 6px; }
+.modal .review-receipt { margin: 14px 0; }
+.modal .review-receipt .section-heading, .modal .review-receipt>p, .modal .review-receipt li { font-size: 11px; }
+.publication-destination { display: grid; gap: 7px; margin: 18px 0; font-size: 12px; }
+.publication-destination>span { color: #98ad8e; font-size: 10px; }
+.publication-destination code { font-size: 10px; overflow-wrap: anywhere; color: #baceaa; margin-bottom: 5px; }
+.publication-destination strong { color: #d0e0b9; font-weight: 550; }
+.publication-field { display: grid; gap: 7px; margin-top: 13px; font-size: 11px; color: #b0c19f; }
+.publication-field input, .publication-field select { width: 100%; font-size: 12px; padding: 9px; }
+.modal p.publication-note { color: #96ac8a; font-size: 10px; line-height: 1.7; margin: 12px 0; }
+.publication-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.publication-actions button { font-size: 11px; }

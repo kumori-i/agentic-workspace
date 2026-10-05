@@ -21,7 +21,7 @@ For the production build:
 npm start
 ```
 
-## What works in v0.2
+## What works in v0.3
 
 - An original, detailed pixel office with 32×48 character frames, textured furnishings, plants, layered lighting, four clickable agents, movement, work animations, zoom, and camera panning.
 - A manager, frontend developer, backend developer, and QA reviewer.
@@ -30,16 +30,17 @@ npm start
 - Native project folder selection. Simulation never reads or changes the selected project's files.
 - Local task history and progress, saved atomically in Electron's application-data directory. In-progress work reopens paused.
 - An isolated desktop renderer and a narrow, validated IPC bridge.
-- A live Codex mode with one real developer, streamed messages and tool output, model selection, explicit command/file approvals, interruption, and revisions in the same thread.
-- A unique Git branch and isolated worktree for each live task, plus a local diff inspector and native worktree folder opener. Branches and files remain available after cancellation or review.
+- A live Codex developer (Rowan) and an independent, read-only reviewer (Quinn), with streamed messages, tool output, model selection, explicit developer approvals, interruption, and revisions in Rowan’s original thread.
+- One Git branch and isolated worktree per live task, shared by implementation and review, plus a diff inspector and native folder opener. Branches and files remain available after cancellation or review.
+- Mira’s explicit commit, merge, and push confirmation, bound to Quinn’s reviewed files, with retained commits and recovery after conflicts, push failures, or interruption.
 
-**Simulation mode** remains available without Codex or authentication. Its worker messages, verification, and progress percentages are demonstrations. **Codex mode** shows actual output from one developer; the other three roles remain idle. There is no automated manager or independent QA worker yet. Live tasks use phase labels rather than invented progress percentages.
+**Simulation mode** remains available without Codex or authentication. Its worker messages, verification, and progress percentages are demonstrations. **Codex mode** runs Rowan’s implementation and Quinn’s review in separate Codex threads. Mira is a workflow coordinator that performs the confirmed Git actions; the frontend role remains idle. Structured manager planning and concurrent implementation workers are future work. Live tasks use phase labels rather than invented progress percentages.
 
 There is no app account. Live inference uses your existing Codex CLI with ChatGPT authentication and that account's usage allowance. API-key and other billing modes are disabled in this milestone.
 
 ## Use a live Codex worker
 
-Install Git and the Codex CLI. The adapter is checked against Codex **0.160.0**:
+Install Git **2.38 or newer** and the Codex CLI. The adapter is checked against Codex **0.160.0**:
 
 ```sh
 npm install -g @openai/codex@0.160.0
@@ -52,9 +53,17 @@ Submit a task and release **Hold queue**. Each task starts from committed HEAD i
 
 Codex runs with workspace-write isolation and network access disabled by default. Requested command/file approvals appear in the inspector. Approve or decline them explicitly. Unsupported interactions are declined and recorded in Activity.
 
-When Codex finishes, use **Inspect changes** and read its reported checks. **Mark reviewed** records your review; it does not merge or push. **Request changes** resumes the same Codex thread and worktree using your feedback. **Interrupt** preserves edits. Hold queue stops new tasks from launching; an active turn continues until interrupted. Restarting the app disconnects Codex, holds the queue, and records unfinished runs as interrupted so they only resume explicitly.
+When Rowan finishes, Mira automatically hands the **same task and worktree** to Quinn. Quinn uses a fresh, read-only Codex thread, inspects the actual files and diff, and returns a structured verdict with findings and reported checks. Reviews that fail, request changes, or become stale cannot authorize publication. Quinn cannot approve requests to escape the read-only sandbox; checks requiring writes may be unavailable and must be reported honestly.
 
-Worktrees are intentionally retained. Reset clears the selected mode's task history, including its worktree links, while leaving Git branches and folders on disk. Copy any paths you need before clearing live history. To integrate reviewed changes yourself, open the worktree, inspect or commit them, and merge the retained task branch using your normal Git workflow.
+After Quinn approves, select **Confirm review with Mira…**, choose an existing Git remote and commit message, then **Prepare Git handoff**. Inspect the task branch, destination branch, and review shown in the dialog. **Confirm · commit, merge & push** commits the reviewed tree, merges it into the branch checked out in the original project folder, and pushes that pinned commit. The project checkout must be clean for a new merge. Existing task commits are retained. Git uses your existing identity and credentials; the app adds no account or sign-in for Git. Protected branches and remote rejection are surfaced as errors.
+
+Selecting Quinn or Mira acts on the **selected existing task**. It does not create a new implementation worktree. **Request changes** returns the task to Rowan’s original thread and worktree, clears the old review, and starts a fresh Quinn review when Rowan finishes. **Finish task · keep changes local** completes the task without publishing. **Interrupt** preserves edits. Hold queue stops new tasks; the current implementation and its review continue. Restart disconnects Codex and holds the queue; unfinished model turns require explicit resume or review. A saved, approved review can be published explicitly without reconnecting Codex.
+
+Confirmation stops if reviewed files, the target branch, target commit, or remote destination changed. A conflict leaves the original checkout untouched and retains Rowan’s commit; resolve the task branch and ask Quinn to review again. A failed push retains the local merge. **Resume Git handoff with Mira** retries its exact commit without including later unreviewed changes. Interrupted Git handoffs never push automatically on restart. The app never force-pushes, stashes, resets, fetches automatically, or removes task branches.
+
+![Mira confirmation in the desktop smoke fixture, with no model inference](docs/handoff-preview.png)
+
+Worktrees are intentionally retained. Reset clears the selected mode's task history, including its worktree links, while leaving Git branches and folders on disk. Copy any paths you need before clearing live history. You can also open the retained worktree and use your normal Git or pull request workflow.
 
 ## Verify
 
@@ -63,9 +72,9 @@ npm run check
 npm run smoke
 ```
 
-`check` runs TypeScript, simulation, persistence, protocol-fixture, real-Git isolation, and live-runtime lifecycle checks, followed by the production build. These automated tests never spend model usage. `smoke` boots the desktop app and checks its renderer, pixel canvas, IPC bridge, disconnected Codex controls, simulation pause, review, rework, and cancellation. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup.
+`check` runs TypeScript, simulation, persistence, protocol fixtures, independent review validation, real-Git publication and recovery, and runtime lifecycle checks, followed by the production build. These automated tests never spend model usage. `smoke` boots the desktop app and checks its renderer, pixel canvas, IPC bridge, disconnected controls, simulation lifecycle, and Mira’s actual confirmation UI. A clearly labeled Codex fixture edits and reviews a disposable repository; real Git commits, merges, and pushes to a temporary local bare remote. It never calls a model or publishes to a user remote. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup.
 
-The v0.2 implementation passes 71 tests, TypeScript, the production build, and the Linux desktop smoke check. The preview above was captured from that Electron window. Actual Codex authentication and model discovery are verified; end-to-end inference remains unverified because thread startup stalled in this managed development environment.
+The v0.3 implementation has 107 automated checks, TypeScript validation, and a production build. The Linux Electron smoke check passes the actual confirmation flow with independent review fixtures and a real commit, merge, and push to a disposable remote. The preview above was captured from that Electron window. Actual Codex authentication and model discovery were verified against 0.160.0; end-to-end live inference and model review remain unverified because thread startup stalled in this managed development environment. Review orchestration is verified with protocol fixtures, and publication with real disposable Git repositories.
 
 ## Package
 
@@ -92,4 +101,4 @@ tests/              Workflow, persistence, Codex protocol, Git, and runtime veri
 scripts/            Build, launch, and cloud environment setup
 ```
 
-All pixel art is defined in `src/renderer/world/OfficeWorld.tsx`. No third-party character sheets or office artwork are included. A project license has not been selected yet.
+All pixel art is defined in `src/renderer/world/office-art.ts` and `character-art.ts`, and animated by `OfficeWorld.tsx`. No third-party character sheets or office artwork are included. A project license has not been selected yet.

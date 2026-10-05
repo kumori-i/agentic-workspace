@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, realpath } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import type { RepositoryInfo, WorktreeInfo, WorktreeInspection } from '../shared/types';
+import type { PublicationPlan, PublicationTargets, ReviewCheckpoint, TaskPublication, RepositoryInfo, WorktreeInfo, WorktreeInspection } from '../shared/types';
 
 const execute = promisify(execFile);
 const MAX_DIFF_BYTES = 256 * 1024;
@@ -14,6 +15,9 @@ const MAX_FILES = 300;
 
 interface GitOutput { stdout: string; truncated: boolean }
 interface WorktreeRecord { path: string; branch: string | null }
+class GitOperationError extends Error {
+  constructor(detail: string, readonly code: string | number | undefined) { super(`Git operation failed: ${detail}`); }
+}
 
 function validPath(value: unknown): value is string {
   return typeof value === 'string' && isAbsolute(value) && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value);
@@ -45,21 +49,23 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-async function git(cwd: string, args: string[], limit = MAX_METADATA_BYTES, allowTruncation = false): Promise<GitOutput> {
+async function git(cwd: string, args: string[], limit = MAX_METADATA_BYTES, allowTruncation = false, indexFile?: string): Promise<GitOutput> {
   try {
     const result = await execute('git', [
       '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
       '-c', 'color.ui=false', ...args,
     ], { cwd, shell: false, windowsHide: true, encoding: 'utf8', timeout: 20_000,
-      maxBuffer: limit, env: gitEnvironment() });
+      maxBuffer: limit, env: { ...gitEnvironment(), ...(indexFile ? { GIT_INDEX_FILE: indexFile } : {}) } });
     return bounded(result.stdout, limit);
   } catch (cause) {
     const error = cause as Error & { code?: string | number; stdout?: string; stderr?: string };
     if (allowTruncation && error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
       return { stdout: bounded(error.stdout ?? '', limit).stdout, truncated: true };
     }
-    const detail = bounded(error.stderr?.trim() || error.message, 1000).stdout;
-    throw new Error(`Git operation failed: ${detail}`);
+    const detail = bounded(error.stderr?.trim() || error.message, 1000).stdout.replace(/(?:https?|ssh|git):\/\/[^\s'"]+/g, address => {
+      try { const url = new URL(address); return `${url.protocol}//${url.host}/[repository]`; } catch { return '[Git remote]'; }
+    });
+    throw new GitOperationError(detail, error.code);
   }
 }
 
@@ -145,6 +151,116 @@ export class GitWorktreeService {
     }
     if (truncated) diff = bounded(`${diff}\n[Review output truncated; inspect the retained worktree for the full changes.]\n`, MAX_DIFF_BYTES).stdout;
     return { status: status.stdout.trimEnd(), diff, files, truncated };
+  }
+
+  /** A full Git tree, including binary/new files, without changing the real index. */
+  async checkpoint(worktree: WorktreeInfo): Promise<ReviewCheckpoint> {
+    const path = await this.validateWorktree(worktree);
+    const head = (await git(path, ['rev-parse', 'HEAD'])).stdout.trim();
+    const temporary = await mkdtemp(join(tmpdir(), 'agentic-review-index-'));
+    try {
+      const index = join(temporary, 'index');
+      await git(path, ['read-tree', head], MAX_METADATA_BYTES, false, index);
+      await git(path, ['add', '--all', '--', '.'], MAX_METADATA_BYTES, false, index);
+      const tree = (await git(path, ['write-tree'], MAX_METADATA_BYTES, false, index)).stdout.trim();
+      if ((await git(path, ['rev-parse', 'HEAD'])).stdout.trim() !== head) throw new Error('The task branch changed while taking the review checkpoint.');
+      return { tree, head };
+    } finally { await rm(temporary, { recursive: true, force: true }); }
+  }
+
+  async publicationTargets(worktree: WorktreeInfo): Promise<PublicationTargets> {
+    await this.validateWorktree(worktree);
+    const repository = await this.inspectRepository(worktree.repositoryPath);
+    if (repository.branch === 'Detached HEAD') throw new Error('Check out the branch you want Mira to merge into in the project folder.');
+    if (repository.branch === worktree.branch) throw new Error('Choose the project checkout, rather than the task branch, as the merge destination.');
+    const remotes = (await git(repository.path, ['remote'])).stdout.trim().split('\n').filter(Boolean);
+    return { targetBranch: repository.branch, remotes };
+  }
+
+  async preparePublication(worktree: WorktreeInfo, reviewed: ReviewCheckpoint, remote: string, commitMessage: string): Promise<PublicationPlan> {
+    const current = await this.checkpoint(worktree);
+    if (current.tree !== reviewed.tree || current.head !== reviewed.head) throw new Error('Rowan’s changes moved after Quinn’s review. Ask Quinn to review them again.');
+    const targets = await this.publicationTargets(worktree);
+    if (!targets.remotes.includes(remote) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(remote)) throw new Error('Choose an existing Git remote.');
+    if (typeof commitMessage !== 'string' || !commitMessage.trim() || commitMessage.length > 500 || commitMessage.includes('\0')) throw new Error('Enter a commit message of 1–500 characters.');
+    const repository = await this.inspectRepository(worktree.repositoryPath);
+    if (repository.dirty) throw new Error('The project checkout has uncommitted changes. Commit or stash them yourself before Mira merges; the app will preserve them.');
+    await git(repository.path, ['check-ref-format', `refs/heads/${targets.targetBranch}`]);
+    return { id: `publication-${randomUUID()}`, taskBranch: worktree.branch, taskHead: reviewed.head, tree: reviewed.tree,
+      targetBranch: targets.targetBranch, targetHead: repository.head, remote, remoteFingerprint: await this.remoteFingerprint(repository.path, remote), commitMessage: commitMessage.trim() };
+  }
+
+  /** Pin every commit before moving refs. Failed push/merge is explicitly retryable. */
+  async publish(worktree: WorktreeInfo, publication: TaskPublication, save: (record: TaskPublication) => Promise<void>): Promise<void> {
+    const plan = publication.plan;
+    const path = await this.validateWorktree(worktree);
+    if (plan.taskBranch !== worktree.branch || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(plan.tree)) throw new Error('The publication plan does not belong to this task.');
+    const targets = await this.publicationTargets(worktree);
+    if (targets.targetBranch !== plan.targetBranch || !targets.remotes.includes(plan.remote)) throw new Error('The destination branch or remote changed. Prepare a new confirmation with Mira.');
+    if (await this.remoteFingerprint(worktree.repositoryPath, plan.remote) !== plan.remoteFingerprint) throw new Error('The Git remote’s push destination changed since confirmation. Restore its configuration or prepare a new handoff with Mira.');
+    const repository = await this.inspectRepository(worktree.repositoryPath);
+    // Recover a merge which completed immediately before the final durable save.
+    let mergeAlreadyApplied = publication.mergeCommit && repository.head === publication.mergeCommit;
+    if (publication.merged && publication.mergeCommit && !mergeAlreadyApplied) {
+      try { await git(repository.path, ['merge-base', '--is-ancestor', publication.mergeCommit, repository.head]); mergeAlreadyApplied = true; }
+      catch { throw new Error('The project branch no longer contains the retained merge. Restore it before retrying the confirmed push.'); }
+    }
+    if (mergeAlreadyApplied) {
+      // Retry only the pinned push, without staging or touching newer edits in either checkout.
+      if (!publication.taskCommit || (await git(path, ['rev-parse', `${publication.taskCommit}^{tree}`])).stdout.trim() !== plan.tree) throw new Error('The retained commit no longer matches Quinn’s review.');
+      await git(path, ['merge-base', '--is-ancestor', publication.taskCommit, publication.mergeCommit!]);
+      await this.pushCommit(repository.path, publication, save); return;
+    }
+    const checkpoint = await this.checkpoint(worktree);
+    if (checkpoint.tree !== plan.tree || ![plan.taskHead, publication.taskCommit].includes(checkpoint.head)) throw new Error('The reviewed worktree changed. A new Quinn review is required.');
+    if (repository.dirty || repository.head !== plan.targetHead) throw new Error('The project checkout changed since confirmation. Mira stopped; existing changes were preserved.');
+    if (!publication.taskCommit) {
+      publication.phase = 'committing'; await save(structuredClone(publication));
+      const headTree = (await git(path, ['rev-parse', `${plan.taskHead}^{tree}`])).stdout.trim();
+      publication.taskCommit = headTree === plan.tree ? plan.taskHead
+        : (await git(path, ['commit-tree', plan.tree, '-p', plan.taskHead, '-m', plan.commitMessage])).stdout.trim();
+      await save(structuredClone(publication)); // Intent survives a crash before update-ref.
+    }
+    if (checkpoint.head !== publication.taskCommit) await git(path, ['update-ref', `refs/heads/${worktree.branch}`, publication.taskCommit, plan.taskHead]);
+    // Index only: never reset or overwrite the worktree's file contents.
+    await git(path, ['read-tree', publication.taskCommit]);
+    if ((await this.checkpoint(worktree)).tree !== plan.tree) throw new Error('Files changed during publication. The commit is retained; ask Quinn to review the new changes.');
+    if (!publication.mergeCommit) {
+      publication.phase = 'merging'; await save(structuredClone(publication));
+      const fastForward = await git(path, ['merge-base', plan.targetHead, publication.taskCommit]);
+      if (fastForward.stdout.trim() === plan.targetHead) publication.mergeCommit = publication.taskCommit;
+      else {
+        // Compute conflicts outside the main checkout. A conflict cannot leave it half-merged.
+        let tree: string;
+        try { tree = (await git(path, ['merge-tree', '--write-tree', plan.targetHead, publication.taskCommit])).stdout.trim().split('\n')[0]; }
+        catch (cause) {
+          if (!(cause instanceof GitOperationError) || cause.code !== 1) throw new Error(`Could not prepare the merge. Git 2.38 or newer is required. ${cause instanceof Error ? cause.message : ''}`);
+          throw new Error('The branches have merge conflicts. Rowan’s commit is retained and the project checkout was not changed. Resolve the task branch, then ask Quinn for a new review.');
+        }
+        publication.mergeCommit = (await git(path, ['commit-tree', tree, '-p', plan.targetHead, '-p', publication.taskCommit, '-m', `Merge reviewed task: ${plan.commitMessage}`])).stdout.trim();
+      }
+      await save(structuredClone(publication));
+    }
+    const latest = await this.inspectRepository(worktree.repositoryPath);
+    if (latest.dirty || latest.head !== plan.targetHead || latest.branch !== plan.targetBranch) throw new Error('The project checkout changed before the merge. Existing files were preserved.');
+    await git(repository.path, ['merge', '--ff-only', '--no-edit', publication.mergeCommit]);
+    await this.pushCommit(repository.path, publication, save);
+  }
+
+  private async pushCommit(repositoryPath: string, publication: TaskPublication, save: (record: TaskPublication) => Promise<void>): Promise<void> {
+    const plan = publication.plan;
+    publication.merged = true; publication.phase = 'pushing'; await save(structuredClone(publication));
+    // Push the reviewed, immutable commit; never force and never push arbitrary HEAD.
+    if (await this.remoteFingerprint(repositoryPath, plan.remote) !== plan.remoteFingerprint) throw new Error('The remote changed before push. The local merge is retained; restore the confirmed remote before retrying.');
+    await git(repositoryPath, ['push', '--porcelain', plan.remote, `${publication.mergeCommit}:refs/heads/${plan.targetBranch}`]);
+    publication.phase = 'published'; publication.publishedAt = new Date().toISOString(); publication.error = undefined;
+    await save(structuredClone(publication));
+  }
+
+  private async remoteFingerprint(path: string, remote: string): Promise<string> {
+    // Bind confirmation to every push URL without putting URLs or embedded credentials in state.
+    const urls = (await git(path, ['remote', 'get-url', '--push', '--all', remote])).stdout;
+    return createHash('sha256').update(urls).digest('hex');
   }
 
   private async root(create: boolean): Promise<string> {
