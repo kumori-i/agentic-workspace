@@ -117,6 +117,7 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     expect(reviewTurn.params.sandboxPolicy).toEqual({ type: 'readOnly', networkAccess: false });
     expect(reviewTurn.params.outputSchema.required).toContain('verdict');
     expect(reviewTurn.params.input[0].text).toContain('+actual fixture edit');
+    expect(reviewTurn.params.input[0].text).toContain('Final actual fixture output.');
     expect(saves.some(snapshot => snapshot.tasks[0]?.review?.checkpoint && !snapshot.tasks[0]?.review?.threadId)).toBe(true);
     expect(runtime.getSnapshot().events.filter(event => event.itemId === 'message-1')).toHaveLength(1);
     expect((await runtime.inspectTask(task.id)).diff).toContain('+actual fixture edit');
@@ -332,5 +333,20 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     await Promise.all([rejected, closing]);
     expect(runtime.getSnapshot().tasks[0].publication).toBeUndefined();
     expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('original\n');
+  });
+
+  it('releases queued work if cancelled Quinn startup later fails', async () => {
+    const task = await start(); await runtime.submitTask('The next task should still start');
+    let entered!: () => void; let fail!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const failed = new Promise<void>(resolve => { fail = resolve; });
+    vi.spyOn(service, 'checkpoint').mockImplementationOnce(async () => { entered(); await failed; throw new Error('Fixture checkpoint error after cancellation'); });
+    client.finish(); await started;
+    await runtime.cancelTask(task.id);
+    expect(runtime.getSnapshot().tasks[1].status).toBe('queued');
+    fail();
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[1].turnId).toBeDefined());
+    expect(runtime.getSnapshot().tasks[0]).toMatchObject({ status: 'cancelled', review: { status: 'interrupted' } });
+    expect(runtime.getSnapshot().tasks[1].status).toBe('working');
   });
 });

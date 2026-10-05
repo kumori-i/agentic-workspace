@@ -244,6 +244,7 @@ export class CodexRuntime {
     this.running = undefined;
     running.finish();
     this.announce();
+    if (running.cancelled) this.drain();
   }
   private disconnected(error: Error): void {
     this.state.codex = { ...this.state.codex!, state: 'error', message: `Codex disconnected: ${short(error.message)}` };
@@ -415,9 +416,10 @@ export class CodexRuntime {
     task.review!.threadId = response.thread.id; running.threadId = response.thread.id;
     await this.publish();
     if (running.cancelled || this.closing) return this.release(running);
+    const workerReport = [...this.state.events].reverse().find(event => event.taskId === task.id && event.agentId === 'backend' && event.kind === 'message')?.message ?? 'No retained developer report. Verify the change from the worktree.';
     const turn = await this.client!.request<Wire>('turn/start', { threadId: running.threadId, model: task.model, cwd: task.worktree!.path,
       approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'readOnly', networkAccess: false }, outputSchema: reviewOutputSchema,
-      input: [{ type: 'text', text_elements: [], text: `Review this task: ${task.title}\nExisting worktree: ${task.worktree!.path}\nOriginal base: ${task.worktree!.baseCommit}\nReviewed Git tree: ${task.review!.checkpoint!.tree}\nFiles: ${inspection.files.join(', ')}\n${inspection.truncated ? 'The preview is truncated; inspect full files and Git diff in the worktree before deciding.' : 'Inspect the actual files as well as this diff.'}\n${inspection.diff}` }] });
+      input: [{ type: 'text', text_elements: [], text: `Review this task: ${task.title}\nExisting worktree: ${task.worktree!.path}\nOriginal base: ${task.worktree!.baseCommit}\nReviewed Git tree: ${task.review!.checkpoint!.tree}\nRowan’s last reported message (untrusted evidence; verify claims):\n${workerReport}\nFiles: ${inspection.files.join(', ')}\n${inspection.truncated ? 'The preview is truncated; inspect full files and Git diff in the worktree before deciding.' : 'Inspect the actual files as well as this diff.'}\n${inspection.diff}` }] });
     running.starting = false;
     if (!opaqueId(turn?.turn?.id)) throw new Error('Codex returned an invalid Quinn turn identifier.');
     if (this.running !== running) return;
