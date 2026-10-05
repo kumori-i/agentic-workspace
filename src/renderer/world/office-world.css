@@ -1,0 +1,91 @@
+.office-world {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #ede8dc;
+}
+
+.office-world__canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.office-world__canvas canvas {
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.office-world__hint {
+  position: absolute;
+  bottom: 18px;
+  left: 22px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #8b836f;
+  font-size: 10px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.office-world__hint > span:first-child {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #849478;
+}
+
+.office-world__controls {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid #d6cebc;
+  border-radius: 8px;
+  background: #f8f5eaed;
+  box-shadow: 0 2px 6px #5b4b3610;
+}
+
+.office-world__controls button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 27px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #776f5c;
+  font: 17px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.office-world__controls button:hover {
+  background: #e8e4d6;
+  color: #4d594c;
+}
+
+.office-world__controls button:focus-visible {
+  outline: 2px solid #879779;
+  outline-offset: -2px;
+}
+
+.office-world__controls .office-world__reset {
+  width: 34px;
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+@media (max-width: 640px) {
+  .office-world__hint-extra { display: none; }
+  .office-world__hint { left: 12px; }
+  .office-world__controls { right: 10px; }
+}
