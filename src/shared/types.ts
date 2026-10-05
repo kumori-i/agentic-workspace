@@ -1,7 +1,49 @@
 export type AgentId = 'manager' | 'frontend' | 'backend' | 'qa';
-export type AgentStatus = 'idle' | 'planning' | 'working' | 'waiting' | 'review';
-export type TaskStatus = 'queued' | 'planning' | 'working' | 'testing' | 'review' | 'completed' | 'cancelled';
-export type JobStatus = 'pending' | 'running' | 'completed';
+export type RuntimeMode = 'simulation' | 'codex';
+export type AgentStatus = 'idle' | 'planning' | 'working' | 'waiting' | 'review' | 'blocked' | 'error';
+export type TaskStatus = 'queued' | 'planning' | 'working' | 'testing' | 'review' | 'completed' | 'cancelled' | 'blocked' | 'failed' | 'interrupted';
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string;
+  repositoryPath: string;
+  baseCommit: string;
+  createdAt: string;
+}
+
+export interface RepositoryInfo {
+  path: string;
+  branch: string;
+  head: string;
+  dirty: boolean;
+}
+
+export interface WorktreeInspection {
+  status: string;
+  diff: string;
+  files: string[];
+  truncated: boolean;
+}
+
+export interface CodexModel { id: string; model: string; displayName: string; isDefault: boolean; }
+export interface CodexStatus {
+  state: 'disconnected' | 'connecting' | 'ready' | 'needs-auth' | 'unavailable' | 'error';
+  auth: 'chatgpt' | 'none' | 'other';
+  message: string;
+  models: CodexModel[];
+  selectedModel: string | null;
+  version?: string;
+  plan?: string;
+}
+
+export interface CodexApproval {
+  id: string;
+  taskId: string;
+  kind: 'command' | 'file';
+  reason: string;
+  detail: string;
+}
 
 export interface Agent {
   id: AgentId;
@@ -32,6 +74,13 @@ export interface Task {
   updatedAt: string;
   iteration: number;
   jobs: Job[];
+  runtime?: RuntimeMode;
+  worktree?: WorktreeInfo;
+  threadId?: string;
+  turnId?: string;
+  model?: string;
+  error?: string;
+  pendingPrompt?: string;
 }
 
 export interface ActivityEvent {
@@ -39,24 +88,27 @@ export interface ActivityEvent {
   timestamp: string;
   agentId: AgentId | null;
   taskId: string | null;
-  kind: 'system' | 'message' | 'task' | 'review';
+  kind: 'system' | 'message' | 'task' | 'review' | 'tool' | 'error';
   message: string;
+  itemId?: string;
 }
 
 export interface WorkspaceSnapshot {
   schemaVersion: 1;
-  mode: 'simulation';
+  mode: RuntimeMode;
   projectPath: string | null;
   paused: boolean;
   agents: Agent[];
   tasks: Task[];
   events: ActivityEvent[];
+  codex?: CodexStatus;
+  approvals?: CodexApproval[];
 }
 
 export interface DesktopInfo {
   appVersion: string;
   platform: string;
-  runtime: 'simulation';
+  runtime: RuntimeMode;
   codexAvailable: boolean;
 }
 
@@ -66,9 +118,16 @@ export interface WorkspaceBridge {
   submitTask(title: string): Promise<WorkspaceSnapshot>;
   setPaused(paused: boolean): Promise<WorkspaceSnapshot>;
   approveTask(taskId: string): Promise<WorkspaceSnapshot>;
-  requestChanges(taskId: string): Promise<WorkspaceSnapshot>;
+  requestChanges(taskId: string, feedback?: string): Promise<WorkspaceSnapshot>;
   cancelTask(taskId: string): Promise<WorkspaceSnapshot>;
   chooseProject(): Promise<WorkspaceSnapshot>;
   resetWorkspace(): Promise<WorkspaceSnapshot>;
+  setMode(mode: RuntimeMode): Promise<WorkspaceSnapshot>;
+  connectCodex(): Promise<WorkspaceSnapshot>;
+  chooseCodexExecutable(): Promise<WorkspaceSnapshot>;
+  setModel(model: string): Promise<WorkspaceSnapshot>;
+  respondToApproval(approvalId: string, accept: boolean): Promise<WorkspaceSnapshot>;
+  inspectTask(taskId: string): Promise<WorktreeInspection>;
+  openWorktree(taskId: string): Promise<void>;
   onSnapshot(callback: (snapshot: WorkspaceSnapshot) => void): () => void;
 }
