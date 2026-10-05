@@ -8,11 +8,15 @@ Own application window, original pixel office, four agent identities, local simu
 
 Local app-server transport, managed ChatGPT authentication, actual model catalog, one developer thread, streamed items, command/file approvals, interruption, explicit resume, isolated Git worktrees, bounded diff review, native folder opening, and durable ownership records. Simulation remains available separately. Office art now uses detailed 32×48 characters and richer original furnishings.
 
-Automated protocol/runtime fixtures and real-Git tests cover lifecycle and isolation. Actual account/model discovery is verified against Codex 0.160.0. Full live inference validation depends on the installed CLI's thread startup and sandbox availability; see the pull request's validation results. No independent QA, automatic merge, or multi-worker inference is claimed.
+Automated protocol/runtime fixtures and real-Git tests cover lifecycle and isolation. Actual account/model discovery is verified against Codex 0.160.0. Full live inference validation depends on the installed CLI's thread startup and sandbox availability; see the pull request's validation results. This milestone established the developer transport and worktree ownership used by v0.3.
 
-## v0.3 — Manager and independent review
+## v0.3 — Independent review and confirmed Git handoff (implemented)
 
-Convert a structured manager plan into dependency-aware worker tasks. Route implementation and review separately, collect diffs and actual test results, then prepare a human-reviewed Git handoff. Limit concurrency, preserve task IDs across restarts, and record actual usage events when supplied by Codex. Do not turn simulated verification messages into real assertions.
+Mira coordinates Rowan → Quinn → user confirmation. Quinn opens a fresh read-only Codex thread in Rowan’s existing worktree, returns structured findings/checks, and approves a specific Git tree. Manager/reviewer controls operate on the selected task, preserving its identity. User confirmation commits, merges into the project’s checked-out branch, and pushes to its chosen existing remote. Stale reviews/plans stop publication. Conflicts and failed pushes preserve partial commits; recovery never pushes automatically. Real Git and Codex fixtures cover the handoff; actual live inference remains subject to the installed CLI startup limitation.
+
+## Next — Structured manager planning
+
+Convert a structured manager plan into dependency-aware implementation tasks, support concurrent workers, select their roles explicitly, and record usage events when supplied by Codex. Keep implementation/review ownership distinct. Do not present simulated verification as model output.
 
 ## v0.4 — Extensible departments
 

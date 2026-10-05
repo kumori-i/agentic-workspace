@@ -10,6 +10,7 @@ import type { DesktopInfo, RuntimeMode, WorkspaceSnapshot } from '../shared/type
 import { CodexRuntime } from './codex-runtime';
 import { GitWorktreeService } from './git-worktrees';
 import { readWorkspaceState, writeWorkspaceState } from './persistence';
+import { createSmokeFixture } from './smoke-fixture';
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'workspace', privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -52,7 +53,7 @@ if (smokeTest) {
   setTimeout(() => {
     console.error('Desktop smoke test exceeded its time limit.');
     app.exit(1);
-  }, 25000).unref();
+  }, 40000).unref();
 }
 
 function getDevelopmentUrl(value: string | undefined): string | undefined {
@@ -272,6 +273,24 @@ function installIpc(): void {
   ipcMain.handle('workspace:inspectTask', async (event, ...args: unknown[]) => {
     authorizeIpc(event); requireLiveMode(); return live.inspectTask(requireTaskId(args));
   });
+  ipcMain.handle('workspace:reviewTask', async (event, ...args: unknown[]) => {
+    authorizeIpc(event); requireLiveMode(); await live.reviewTask(requireTaskId(args)); return completeAction();
+  });
+  ipcMain.handle('workspace:getPublicationTargets', async (event, ...args: unknown[]) => {
+    authorizeIpc(event); requireLiveMode(); return live.getPublicationTargets(requireTaskId(args));
+  });
+  ipcMain.handle('workspace:preparePublication', async (event, ...args: unknown[]) => {
+    authorizeIpc(event); requireLiveMode();
+    if (args.length !== 3 || typeof args[1] !== 'string' || args[1].length > 100 || typeof args[2] !== 'string' || !args[2].trim() || args[2].length > 500 || args[2].includes('\0')) throw new TypeError('Choose a remote and a commit message.');
+    const taskId = requireTaskId(args.slice(0, 1));
+    const remote = args[1]; const commitMessage = args[2];
+    return configure(async () => { await live.preparePublication(taskId, remote, commitMessage); return completeAction(); });
+  });
+  ipcMain.handle('workspace:confirmPublication', async (event, ...args: unknown[]) => {
+    authorizeIpc(event); requireLiveMode();
+    if (args.length !== 2 || typeof args[1] !== 'string' || !/^publication-[a-f0-9-]{36}$/.test(args[1])) throw new TypeError('Confirm a valid publication plan.');
+    await live.confirmPublication(requireTaskId(args.slice(0, 1)), args[1]); return completeAction();
+  });
   ipcMain.handle('workspace:openWorktree', async (event, ...args: unknown[]) => {
     authorizeIpc(event); requireLiveMode();
     const path = await live.worktreePath(requireTaskId(args));
@@ -362,6 +381,10 @@ async function runSmokeTest(window: BrowserWindow): Promise<void> {
           () => window.workspace.respondToApproval('missing-approval', true),
           () => window.workspace.inspectTask('missing-task'),
           () => window.workspace.openWorktree('missing-task'),
+          () => window.workspace.reviewTask('missing-task'),
+          () => window.workspace.getPublicationTargets('missing-task'),
+          () => window.workspace.preparePublication('missing-task', 'origin', 'Invalid test'),
+          () => window.workspace.confirmPublication('missing-task', 'publication-invalid'),
         ];
         for (const operation of rejectedOperations) {
           let rejected = false;
@@ -415,7 +438,67 @@ async function runSmokeTest(window: BrowserWindow): Promise<void> {
         return { requestChanges: true, cancel: true };
       })()
     `);
-    console.log(JSON.stringify({ smokeTest: { ok: true, ...result, ...controls, screenshot: Boolean(smokeScreenshot) } }));
+    const handoff = await window.webContents.executeJavaScript(`
+      (async () => {
+        await window.workspace.setMode('codex');
+        await window.workspace.connectCodex();
+        await window.workspace.setPaused(false);
+        const started = await window.workspace.submitTask('Make the disposable README describe local use.');
+        const taskId = started.tasks[0].id;
+        const deadline = Date.now() + 10000;
+        let current;
+        do {
+          if (Date.now() > deadline) throw new Error('Independent smoke review did not finish.');
+          await new Promise(resolve => setTimeout(resolve, 50));
+          current = await window.workspace.getSnapshot();
+        } while (current.tasks[0].review?.status !== 'approved');
+        const task = current.tasks[0];
+        if (task.review.threadId === task.threadId || task.status !== 'review') throw new Error('Quinn did not use an independent review thread.');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const confirm = [...document.querySelectorAll('button')].find(button => button.textContent.includes('Confirm review with Mira'));
+        if (!confirm || confirm.disabled) throw new Error('Mira confirmation control is missing.');
+        confirm.click();
+        while (!document.querySelector('[aria-label="Publication remote"]')?.value) {
+          if (Date.now() > deadline) throw new Error('Mira did not show the existing Git remote.');
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        const dialog = document.querySelector('[aria-labelledby="publication-title"]');
+        if (!dialog?.textContent.includes('Quinn’s independent review') || !dialog.textContent.includes('main')) throw new Error('Mira confirmation omits the review or destination.');
+        [...dialog.querySelectorAll('button')].find(button => button.textContent.includes('Prepare Git handoff')).click();
+        do {
+          if (Date.now() > deadline) throw new Error('Mira did not prepare the Git handoff.');
+          await new Promise(resolve => setTimeout(resolve, 50));
+          current = await window.workspace.getSnapshot();
+        } while (current.tasks[0].publication?.phase !== 'prepared');
+        if (current.tasks.length !== 1 || current.tasks[0].worktree.path !== task.worktree.path) throw new Error('The handoff created another task or worktree.');
+        return { taskId, independentReview: true, existingWorktree: true, confirmationUI: true };
+      })()
+    `);
+    if (smokeScreenshot) {
+      await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+      const screenshot = await window.webContents.capturePage();
+      await writeFile(join(dirname(smokeScreenshot), 'handoff-preview.png'), screenshot.toPNG(), { mode: 0o600 });
+    }
+    const publication = await window.webContents.executeJavaScript(`
+      (async () => {
+        const taskId = ${JSON.stringify(handoff.taskId)};
+        const dialog = document.querySelector('[aria-labelledby="publication-title"]');
+        const confirm = [...dialog.querySelectorAll('button')].find(button => button.textContent.includes('Confirm · commit, merge & push'));
+        if (!confirm || confirm.disabled) throw new Error('Final Git confirmation is missing.');
+        confirm.click();
+        const deadline = Date.now() + 10000;
+        let current;
+        do {
+          if (Date.now() > deadline) throw new Error('Confirmed Git publication did not complete.');
+          await new Promise(resolve => setTimeout(resolve, 50));
+          current = await window.workspace.getSnapshot();
+          if (current.tasks[0].publication?.phase === 'failed') throw new Error(current.tasks[0].error);
+        } while (current.tasks[0].publication?.phase !== 'published');
+        if (current.tasks[0].id !== taskId || current.tasks[0].status !== 'completed') throw new Error('Publication did not complete the original task.');
+        return { committedMergedPushed: true };
+      })()
+    `);
+    console.log(JSON.stringify({ smokeTest: { ok: true, ...result, ...controls, ...handoff, ...publication, inference: false, screenshot: Boolean(smokeScreenshot) } }));
     app.quit();
   } catch (error) {
     console.error('Desktop smoke test failed:', (error as Error).message);
@@ -455,14 +538,17 @@ if (!smokeTest && !app.requestSingleInstanceLock()) {
     }
     const liveRestored = await readWorkspaceState(stateFiles.codex);
     if (liveRestored.warning) console.warn(liveRestored.warning);
+    const smokeFixture = smokeTest ? await createSmokeFixture(app.getPath('userData')) : undefined;
     live = new CodexRuntime({
-      snapshot: liveRestored.snapshot?.mode === 'codex' ? liveRestored.snapshot : undefined,
+      snapshot: !smokeTest && liveRestored.snapshot?.mode === 'codex' ? liveRestored.snapshot : undefined,
       worktrees: new GitWorktreeService(join(app.getPath('userData'), 'worktrees')),
+      clientFactory: smokeFixture?.clientFactory,
       onChange: async snapshot => {
         await saveWorkspaceSnapshot(snapshot);
         if (mode === 'codex') publish(snapshot, false);
       },
     });
+    if (smokeFixture) await live.setProject(smokeFixture.repository);
     installIpc();
     if (!devUrl) await installRendererProtocol();
     await createWindow();

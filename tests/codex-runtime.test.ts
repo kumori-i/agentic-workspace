@@ -18,10 +18,12 @@ class FixtureClient implements RuntimeClient {
   exits = new Set<(error: Error) => void>();
   thread = 'thread-fixture';
   turn = 0;
+  threads = 0;
   connect = async () => structuredClone(ready);
   request = async <T = unknown>(method: string, params: any): Promise<T> => {
     this.requests.push({ method, params: structuredClone(params) });
-    if (method === 'thread/start' || method === 'thread/resume') return { thread: { id: this.thread } } as T;
+    if (method === 'thread/start') { this.thread = `thread-fixture-${++this.threads}`; return { thread: { id: this.thread } } as T; }
+    if (method === 'thread/resume') { this.thread = params.threadId; return { thread: { id: this.thread } } as T; }
     if (method === 'turn/start') {
       const id = `turn-${++this.turn}`;
       this.emit('turn/started', { threadId: this.thread, turn: { id } });
@@ -45,18 +47,20 @@ describe('live runtime with real Git and a fixture Codex server', () => {
   let repository: string;
   let client: FixtureClient;
   let runtime: CodexRuntime;
+  let service: GitWorktreeService;
   let saves: WorkspaceSnapshot[];
   beforeEach(async () => {
     folder = await mkdtemp(join(tmpdir(), 'aw-runtime-'));
     repository = join(folder, 'repository');
-    await execute('git', ['init', repository]);
+    await execute('git', ['init', '-b', 'main', repository]);
     await execute('git', ['-C', repository, 'config', 'user.email', 'fixture@example.invalid']);
     await execute('git', ['-C', repository, 'config', 'user.name', 'Fixture']);
     await writeFile(join(repository, 'hello.txt'), 'original\n');
     await execute('git', ['-C', repository, 'add', '.']);
     await execute('git', ['-C', repository, 'commit', '-m', 'Fixture baseline']);
     client = new FixtureClient(); saves = [];
-    runtime = new CodexRuntime({ worktrees: new GitWorktreeService(join(folder, 'worktrees')), clientFactory: () => client, onChange: async snapshot => { saves.push(snapshot); } });
+    service = new GitWorktreeService(join(folder, 'worktrees'));
+    runtime = new CodexRuntime({ worktrees: service, clientFactory: () => client, onChange: async snapshot => { saves.push(snapshot); } });
     await runtime.setProject(repository);
     await runtime.connect();
     runtime.setPaused(false);
@@ -66,6 +70,27 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     await runtime.submitTask('Change hello.txt and report checks.');
     await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0]?.turnId).toBe('turn-1'));
     return runtime.getSnapshot().tasks[0];
+  }
+
+  async function completeReview(verdict = 'approved') {
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0]?.review?.turnId).toBeDefined());
+    client.emit('item/completed', { threadId: client.thread, turnId: `turn-${client.turn}`, item: { id: `review-${client.turn}`, type: 'agentMessage', phase: 'final_answer', text: JSON.stringify({ verdict, summary: 'Fixture review of actual files; no inference.', findings: verdict === 'approved' ? [] : ['Fix the fixture issue.'], checks: ['Inspected the fixture diff.'] }) } });
+    client.finish();
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0]?.status).toBe('review'));
+  }
+
+  async function reviewedTask() {
+    const task = await start();
+    await writeFile(join(task.worktree!.path, 'hello.txt'), 'reviewed fixture edit\n');
+    client.finish(); await completeReview();
+    return runtime.getSnapshot().tasks[0];
+  }
+  async function addRemote() {
+    const remote = join(folder, 'remote.git');
+    await execute('git', ['init', '--bare', remote]);
+    await execute('git', ['-C', repository, 'remote', 'add', 'origin', remote]);
+    await execute('git', ['-C', repository, 'push', 'origin', 'main']);
+    return remote;
   }
 
   it('persists ownership before inference, isolates changes, streams actual output, and leaves review unmerged', async () => {
@@ -80,7 +105,19 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     client.emit('item/agentMessage/delta', { threadId: client.thread, turnId: 'turn-1', itemId: 'message-1', delta: 'second' });
     client.emit('item/completed', { threadId: client.thread, turnId: 'turn-1', item: { id: 'message-1', type: 'agentMessage', text: 'Final actual fixture output.' } });
     client.finish();
+    expect(runtime.getSnapshot().tasks[0].status).toBe('reviewing');
+    await completeReview();
     expect(runtime.getSnapshot().tasks[0].status).toBe('review');
+    const reviewed = runtime.getSnapshot().tasks[0];
+    expect(reviewed.review?.threadId).not.toBe(reviewed.threadId);
+    expect(reviewed.review).toMatchObject({ status: 'approved', summary: 'Fixture review of actual files; no inference.' });
+    const reviewerStart = client.requests.filter(request => request.method === 'thread/start').at(-1)!;
+    expect(reviewerStart.params).toMatchObject({ cwd: task.worktree!.path, sandbox: 'read-only', approvalPolicy: 'never' });
+    const reviewTurn = client.requests.filter(request => request.method === 'turn/start').at(-1)!;
+    expect(reviewTurn.params.sandboxPolicy).toEqual({ type: 'readOnly', networkAccess: false });
+    expect(reviewTurn.params.outputSchema.required).toContain('verdict');
+    expect(reviewTurn.params.input[0].text).toContain('+actual fixture edit');
+    expect(saves.some(snapshot => snapshot.tasks[0]?.review?.checkpoint && !snapshot.tasks[0]?.review?.threadId)).toBe(true);
     expect(runtime.getSnapshot().events.filter(event => event.itemId === 'message-1')).toHaveLength(1);
     expect((await runtime.inspectTask(task.id)).diff).toContain('+actual fixture edit');
     expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('original\n');
@@ -107,15 +144,18 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     const first = await start();
     await runtime.submitTask('Another task');
     client.finish();
-    expect(client.requests.filter(request => request.method === 'turn/start')).toHaveLength(1);
+    await completeReview('changes-requested');
+    expect(client.requests.filter(request => request.method === 'turn/start')).toHaveLength(2);
+    expect(runtime.getSnapshot().tasks[1].status).toBe('queued');
     await expect(runtime.requestChanges(first.id)).rejects.toThrow('Describe');
     await runtime.requestChanges(first.id, 'Correct the edge case.');
-    await vi.waitFor(() => expect(client.requests.filter(request => request.method === 'turn/start')).toHaveLength(2));
+    await vi.waitFor(() => expect(client.requests.filter(request => request.method === 'turn/start')).toHaveLength(3));
     const turn = client.requests.filter(request => request.method === 'turn/start').at(-1)!;
     expect(turn.params.input[0].text).toBe('Correct the edge case.');
     expect(turn.params.cwd).toBe(first.worktree!.path);
     expect(client.requests.some(request => request.method === 'thread/resume')).toBe(true);
     client.finish();
+    await completeReview();
   });
 
   it('ignores stale turn completions and holds the queue after a real failure', async () => {
@@ -157,5 +197,140 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     await vi.waitFor(() => expect(guarded.getSnapshot().tasks[0].status).toBe('failed'));
     expect(client.requests).toHaveLength(0);
     expect(guarded.getSnapshot().paused).toBe(true);
+  });
+
+  it('requires Quinn approval and a matching user confirmation before real Git publication', async () => {
+    const remote = await addRemote();
+    const task = await reviewedTask();
+    const before = (await execute('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout.trim();
+    const prepared = await runtime.preparePublication(task.id, 'origin', 'Review fixture change');
+    expect(prepared.tasks[0].publication?.phase).toBe('prepared');
+    expect((await execute('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout.trim()).toBe(before);
+    await expect(runtime.confirmPublication(task.id, 'publication-wrong')).rejects.toThrow('current, Quinn-approved');
+    const published = await runtime.confirmPublication(task.id, prepared.tasks[0].publication!.plan.id);
+    expect(published.tasks[0]).toMatchObject({ status: 'completed', publication: { phase: 'published', merged: true } });
+    expect((await execute('git', ['-C', remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(published.tasks[0].publication!.mergeCommit);
+    expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('reviewed fixture edit\n');
+    expect(published.events.some(event => event.agentId === 'qa' && event.kind === 'review')).toBe(true);
+    expect(published.events.some(event => event.agentId === 'manager' && event.message.includes('pushed'))).toBe(true);
+  });
+
+  it('keeps manager and reviewer actions on the existing task, including older local completions', async () => {
+    const task = await reviewedTask();
+    const workerThread = task.threadId;
+    runtime.approveTask(task.id);
+    await runtime.reviewTask(task.id); await completeReview();
+    expect(runtime.getSnapshot().tasks).toHaveLength(1);
+    expect(runtime.getSnapshot().tasks[0].worktree).toEqual(task.worktree);
+    expect(runtime.getSnapshot().tasks[0].threadId).toBe(workerThread);
+    expect(client.requests.filter(request => request.method === 'thread/start')).toHaveLength(3);
+    expect(runtime.getSnapshot().tasks[0].jobs).toHaveLength(2);
+  });
+
+  it('rejects failed, malformed or changes-requested reviews as publication authority', async () => {
+    const task = await start();
+    client.finish(); await completeReview('changes-requested');
+    await expect(runtime.preparePublication(task.id, 'origin', 'Must not publish')).rejects.toThrow('Quinn must approve');
+    await runtime.reviewTask(task.id);
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0].review?.turnId).toBeDefined());
+    client.emit('item/completed', { threadId: client.thread, turnId: `turn-${client.turn}`, item: { id: 'bad-review', type: 'agentMessage', text: 'Looks fine, just push it!' } });
+    client.finish();
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0].review?.status).toBe('failed'));
+    await expect(runtime.preparePublication(task.id, 'origin', 'Must not publish')).rejects.toThrow('Quinn must approve');
+    expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('original\n');
+  });
+
+  it('invalidates a review if files change while Quinn is reviewing', async () => {
+    const task = await start(); client.finish();
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0].review?.turnId).toBeDefined());
+    await writeFile(join(task.worktree!.path, 'hello.txt'), 'edit made during review\n');
+    await completeReview();
+    expect(runtime.getSnapshot().tasks[0].review?.status).toBe('stale');
+    await expect(runtime.preparePublication(task.id, 'origin', 'Must not publish')).rejects.toThrow('Quinn must approve');
+  });
+
+  it('declines reviewer escalation and retains Rowan’s completed work when Quinn is cancelled', async () => {
+    const task = await start(); client.finish();
+    await vi.waitFor(() => expect(runtime.getSnapshot().tasks[0].review?.turnId).toBeDefined());
+    client.approval(123);
+    expect(client.responses.at(-1)).toEqual({ id: 123, result: { decision: 'decline' } });
+    expect(runtime.getSnapshot().approvals).toEqual([]);
+    expect(runtime.getSnapshot().tasks[0].status).toBe('reviewing');
+    const cancelled = await runtime.cancelTask(task.id);
+    expect(cancelled.tasks[0]).toMatchObject({ status: 'cancelled', review: { status: 'interrupted' } });
+    expect(cancelled.tasks[0].jobs[0].status).toBe('completed');
+    expect(cancelled.tasks[0].worktree).toEqual(task.worktree);
+  });
+
+  it('does not auto-publish or launch inference on restart with a prepared or interrupted handoff', async () => {
+    await addRemote(); const task = await reviewedTask();
+    const prepared = await runtime.preparePublication(task.id, 'origin', 'Review fixture change');
+    for (const phase of ['prepared', 'pushing'] as const) {
+      const snapshot = structuredClone(prepared);
+      snapshot.tasks[0].publication!.phase = phase;
+      snapshot.tasks[0].status = phase === 'pushing' ? 'publishing' : 'review';
+      const restored = new CodexRuntime({ snapshot, worktrees: new GitWorktreeService(join(folder, 'worktrees')), clientFactory: () => { throw new Error('Must not launch inference'); }, onChange: async () => {} });
+      expect(restored.isBusy).toBe(false);
+      expect(restored.getSnapshot().tasks[0].publication?.phase).toBe(phase === 'prepared' ? 'prepared' : 'interrupted');
+      expect(restored.getSnapshot().tasks[0].review?.status).toBe('approved');
+      expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('original\n');
+      await restored.close();
+    }
+  });
+
+  it('can explicitly publish a durable Quinn-approved review after restart without reconnecting Codex', async () => {
+    await addRemote(); const task = await reviewedTask();
+    const prepared = await runtime.preparePublication(task.id, 'origin', 'Reviewed fixture');
+    await runtime.close();
+    const restored = new CodexRuntime({ snapshot: prepared, worktrees: service, clientFactory: () => { throw new Error('Git handoff must not start model inference'); }, onChange: async () => {} });
+    try {
+      const published = await restored.confirmPublication(task.id, prepared.tasks[0].publication!.plan.id);
+      expect(published.tasks[0].publication?.phase).toBe('published');
+      expect(published.codex?.state).toBe('disconnected');
+    } finally { await restored.close(); }
+  });
+
+  it('blocks overlapping actions and waits for a confirmed Git transaction before closing', async () => {
+    await addRemote(); const task = await reviewedTask();
+    const prepared = await runtime.preparePublication(task.id, 'origin', 'Reviewed fixture');
+    let entered!: () => void; let resume!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const publish = service.publish.bind(service);
+    vi.spyOn(service, 'publish').mockImplementation(async (...args) => { entered(); await gate; return publish(...args); });
+    const transaction = runtime.confirmPublication(task.id, prepared.tasks[0].publication!.plan.id);
+    await started;
+    expect(runtime.isBusy).toBe(true);
+    expect(runtime.getSnapshot().tasks[0].status).toBe('publishing');
+    await expect(runtime.cancelTask(task.id)).rejects.toThrow('Git handoff');
+    await expect(runtime.reviewTask(task.id)).rejects.toThrow('active Codex task');
+    await expect(runtime.setProject(repository)).rejects.toThrow('active Codex task');
+    expect(() => runtime.reset()).toThrow('active Codex task');
+    let closed = false;
+    const closing = runtime.close().then(() => { closed = true; });
+    await Promise.resolve(); expect(closed).toBe(false);
+    resume(); await Promise.all([transaction, closing]);
+    expect(runtime.getSnapshot().tasks[0].publication?.phase).toBe('published');
+    expect(runtime.getSnapshot().paused).toBe(true);
+    expect(runtime.isBusy).toBe(false);
+  });
+
+  it('does not resurrect a task when closing races with Git plan preparation', async () => {
+    await addRemote(); const task = await reviewedTask();
+    let entered!: () => void; let resume!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const prepare = service.preparePublication.bind(service);
+    vi.spyOn(service, 'preparePublication').mockImplementation(async (...args) => { entered(); await gate; return prepare(...args); });
+    const preparation = runtime.preparePublication(task.id, 'origin', 'Reviewed fixture');
+    const rejected = expect(preparation).rejects.toThrow('closing');
+    await started;
+    expect(runtime.isBusy).toBe(true);
+    await expect(runtime.reviewTask(task.id)).rejects.toThrow('active Codex task');
+    await expect(runtime.cancelTask(task.id)).rejects.toThrow('Git handoff');
+    const closing = runtime.close(); resume();
+    await Promise.all([rejected, closing]);
+    expect(runtime.getSnapshot().tasks[0].publication).toBeUndefined();
+    expect(await readFile(join(repository, 'hello.txt'), 'utf8')).toBe('original\n');
   });
 });

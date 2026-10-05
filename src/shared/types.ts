@@ -1,7 +1,7 @@
 export type AgentId = 'manager' | 'frontend' | 'backend' | 'qa';
 export type RuntimeMode = 'simulation' | 'codex';
 export type AgentStatus = 'idle' | 'planning' | 'working' | 'waiting' | 'review' | 'blocked' | 'error';
-export type TaskStatus = 'queued' | 'planning' | 'working' | 'testing' | 'review' | 'completed' | 'cancelled' | 'blocked' | 'failed' | 'interrupted';
+export type TaskStatus = 'queued' | 'planning' | 'working' | 'testing' | 'reviewing' | 'publishing' | 'review' | 'completed' | 'cancelled' | 'blocked' | 'failed' | 'interrupted';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface WorktreeInfo {
@@ -25,6 +25,39 @@ export interface WorktreeInspection {
   files: string[];
   truncated: boolean;
 }
+
+export interface ReviewCheckpoint { tree: string; head: string; }
+export interface TaskReview {
+  status: 'pending' | 'running' | 'approved' | 'changes-requested' | 'failed' | 'interrupted' | 'stale';
+  checkpoint?: ReviewCheckpoint;
+  threadId?: string;
+  turnId?: string;
+  summary: string;
+  findings: string[];
+  checks: string[];
+  completedAt?: string;
+}
+export interface PublicationPlan {
+  id: string;
+  taskBranch: string;
+  taskHead: string;
+  tree: string;
+  targetBranch: string;
+  targetHead: string;
+  remote: string;
+  remoteFingerprint: string;
+  commitMessage: string;
+}
+export interface TaskPublication {
+  plan: PublicationPlan;
+  phase: 'prepared' | 'committing' | 'merging' | 'pushing' | 'published' | 'failed' | 'interrupted';
+  taskCommit?: string;
+  mergeCommit?: string;
+  merged?: boolean;
+  error?: string;
+  publishedAt?: string;
+}
+export interface PublicationTargets { targetBranch: string; remotes: string[]; }
 
 export interface CodexModel { id: string; model: string; displayName: string; isDefault: boolean; }
 export interface CodexStatus {
@@ -81,6 +114,8 @@ export interface Task {
   model?: string;
   error?: string;
   pendingPrompt?: string;
+  review?: TaskReview;
+  publication?: TaskPublication;
 }
 
 export interface ActivityEvent {
@@ -129,5 +164,9 @@ export interface WorkspaceBridge {
   respondToApproval(approvalId: string, accept: boolean): Promise<WorkspaceSnapshot>;
   inspectTask(taskId: string): Promise<WorktreeInspection>;
   openWorktree(taskId: string): Promise<void>;
+  reviewTask(taskId: string): Promise<WorkspaceSnapshot>;
+  getPublicationTargets(taskId: string): Promise<PublicationTargets>;
+  preparePublication(taskId: string, remote: string, commitMessage: string): Promise<WorkspaceSnapshot>;
+  confirmPublication(taskId: string, planId: string): Promise<WorkspaceSnapshot>;
   onSnapshot(callback: (snapshot: WorkspaceSnapshot) => void): () => void;
 }
