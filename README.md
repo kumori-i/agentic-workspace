@@ -2,6 +2,8 @@
 
 A standalone desktop application that represents an agent workflow as a small, animated pixel office. Electron opens its own application window; React supplies the controls and Phaser renders original, procedurally drawn artwork.
 
+![Desktop simulation preview](docs/office-preview.png)
+
 ## Run locally
 
 Install Node.js **24 or newer**, clone this repository, then run:
@@ -40,7 +42,7 @@ npm run check
 npm run smoke
 ```
 
-`check` runs TypeScript checks, engine and persistence tests, and the production build. `smoke` boots the built desktop app and checks its renderer, pixel canvas, and IPC bridge. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup.
+`check` runs TypeScript checks, engine and persistence tests, and the production build. `smoke` boots the built desktop app and checks its renderer, pixel canvas, IPC bridge, pause, review, rework, and cancellation. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup. All 21 tests, the production build, and the Linux desktop smoke check passed for the foundation implementation.
 
 ## Package
 
