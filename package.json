@@ -1,0 +1,43 @@
+{
+  "name": "agentic-workspace",
+  "version": "0.1.0",
+  "description": "A local desktop workspace for visual agent workflows",
+  "private": true,
+  "type": "module",
+  "main": "dist/desktop/main.cjs",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs",
+    "prestart": "npm run build",
+    "start": "node scripts/start.mjs",
+    "smoke": "node scripts/start.mjs --smoke-test",
+    "package": "npm run build && electron-builder --publish never",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "phaser": "3.90.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "5.0.3"
+  },
+  "build": {
+    "appId": "dev.agenticworkspace.desktop",
+    "productName": "Agentic Workspace",
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "package.json"],
+    "mac": { "target": "dmg", "category": "public.app-category.developer-tools" },
+    "win": { "target": "nsis" },
+    "linux": { "target": "AppImage", "category": "Development" }
+  }
+}
