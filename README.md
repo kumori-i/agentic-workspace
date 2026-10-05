@@ -65,7 +65,7 @@ npm run smoke
 
 `check` runs TypeScript, simulation, persistence, protocol-fixture, real-Git isolation, and live-runtime lifecycle checks, followed by the production build. These automated tests never spend model usage. `smoke` boots the desktop app and checks its renderer, pixel canvas, IPC bridge, disconnected Codex controls, simulation pause, review, rework, and cancellation. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup.
 
-The v0.2 implementation passes 67 tests, TypeScript, the production build, and the Linux desktop smoke check. The preview above was captured from that Electron window.
+The v0.2 implementation passes 71 tests, TypeScript, the production build, and the Linux desktop smoke check. The preview above was captured from that Electron window. Actual Codex authentication and model discovery are verified; end-to-end inference remains unverified because thread startup stalled in this managed development environment.
 
 ## Package
 

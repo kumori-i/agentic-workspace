@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CodexClient, codexEnvironment, type CodexProcess, type CodexSpawnOptions } from '../src/desktop/codex-client';
+import { CodexClient, codexEnvironment, type CodexClientOptions, type CodexProcess, type CodexSpawnOptions } from '../src/desktop/codex-client';
 
 type Message = { id?: string | number; method?: string; params?: unknown; result?: unknown; error?: unknown };
 
 class FixtureProcess extends EventEmitter implements CodexProcess {
+  pid?: number;
   stdout = new PassThrough();
   stderr = new PassThrough();
   stdin: Writable;
@@ -51,7 +52,7 @@ class FixtureProcess extends EventEmitter implements CodexProcess {
 }
 
 const clients: CodexClient[] = [];
-function clientFor(process = new FixtureProcess(), options: { requestTimeoutMs?: number; maxBufferBytes?: number } = {}) {
+function clientFor(process = new FixtureProcess(), options: CodexClientOptions = {}) {
   const client = new CodexClient('/local/bin/codex', { processFactory: () => process, closeTimeoutMs: 20, ...options });
   clients.push(client);
   return { client, process };
@@ -89,7 +90,9 @@ describe('local Codex JSONL transport', () => {
     });
     clients.push(client);
     await client.connect();
-    expect(invocation).toMatchObject({ executable: '/path with spaces/codex', args: ['app-server'], options: { shell: false, stdio: ['pipe', 'pipe', 'pipe'] } });
+    expect(invocation).toMatchObject({ executable: '/path with spaces/codex', args: ['app-server'], options: {
+      shell: false, detached: globalThis.process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
+    } });
     for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY']) expect(invocation!.options.env[key]).toBeUndefined();
     expect(codexEnvironment({ PATH: '/bin', OPENAI_APIKEY: 'secret', KEEP_ME: 'value' })).toEqual({ PATH: '/bin', KEEP_ME: 'value' });
   });
@@ -232,5 +235,52 @@ describe('local Codex JSONL transport', () => {
     expect(client.getStatus().state).toBe('disconnected');
     expect((await client.connect()).state).toBe('ready');
     expect(next.messages[0].method).toBe('initialize');
+  });
+
+  it.skipIf(globalThis.process.platform === 'win32')('escalates the owned group when a wrapper exits before its descendant drains stdio', async () => {
+    const fixture = new FixtureProcess();
+    fixture.pid = 31415;
+    const signals: [number, NodeJS.Signals][] = [];
+    const { client } = clientFor(fixture, { processGroupSignal: (groupId, signal) => {
+      signals.push([groupId, signal]);
+      if (signal === 'SIGTERM') fixture.emit('exit', 0, signal);
+      else fixture.emit('close', 0, signal);
+    } });
+    await client.connect();
+    // Mutating the fixture after spawn cannot substitute an arbitrary target.
+    fixture.pid = 99999;
+    await client.close();
+    expect(signals).toEqual([[-31415, 'SIGTERM'], [-31415, 'SIGKILL']]);
+    expect(fixture.kills).toEqual([]);
+    expect(client.getStatus().state).toBe('disconnected');
+  });
+
+  it.skipIf(globalThis.process.platform === 'win32')('waits for owned descendant cleanup after a request failure detaches the transport', async () => {
+    const fixture = new FixtureProcess();
+    fixture.pid = 31416;
+    const signals: [number, NodeJS.Signals][] = [];
+    const { client } = clientFor(fixture, { requestTimeoutMs: 20, processGroupSignal: (groupId, signal) => {
+      signals.push([groupId, signal]);
+      if (signal === 'SIGTERM') fixture.emit('exit', 0, signal);
+      else fixture.emit('close', 0, signal);
+    } });
+    await client.connect();
+    fixture.handler = message => message.method === 'turn/start';
+    await expect(client.request('turn/start', {})).rejects.toThrow('did not answer');
+    await client.close();
+    expect(signals).toEqual([[-31416, 'SIGTERM'], [-31416, 'SIGKILL']]);
+  });
+
+  it('rejects invalid OS PIDs and uses only the fixture process fallback', async () => {
+    for (const pid of [0, 1, -999, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      const fixture = new FixtureProcess();
+      fixture.pid = pid;
+      const signalGroup = vi.fn();
+      const { client } = clientFor(fixture, { processGroupSignal: signalGroup });
+      await client.connect();
+      await client.close();
+      expect(signalGroup).not.toHaveBeenCalled();
+      expect(fixture.kills).toEqual(['SIGTERM']);
+    }
   });
 });

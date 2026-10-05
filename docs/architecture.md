@@ -16,7 +16,7 @@ Live mode's Hold queue prevents new launches without suspending the active turn.
 
 Thread configuration explicitly selects the OpenAI provider, `workspace-write`, user-reviewed `on-request` approvals, and the task worktree. Turns set the writable root to that worktree and disable network access. Command/file approval requests reach the user; unsupported interactions receive an explicit refusal and Activity entry. The app does not automatically approve requests.
 
-Requests have bounded timeouts; thread startup has a longer initialization allowance. UTF-8 JSONL parsing has bounded buffers. Death, malformed protocol, changed authentication, and ambiguous timeout reject pending requests and terminate the transport. Thread/turn identity checks ignore unrelated notifications. Actual messages, command output/exit codes, and file-change status are retained as bounded local events. Process stderr is drained without exposing authentication diagnostics.
+Requests have bounded timeouts; thread startup has a longer initialization allowance. UTF-8 JSONL parsing has bounded buffers. Death, malformed protocol, changed authentication, and ambiguous timeout reject pending requests and terminate the transport. Cleanup covers the owned process group on POSIX and uses a bounded native process-tree operation on Windows; wrapper exit alone cannot suppress escalation while descendants retain stdio. Thread/turn identity checks ignore unrelated notifications. Cancellation waits for actual turn completion or disconnects the worker before queued work can launch. Actual messages, command output/exit codes, and file-change status are retained as bounded local events. Process stderr is drained without exposing authentication diagnostics.
 
 ## Git worktrees
 

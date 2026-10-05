@@ -201,8 +201,7 @@ export class CodexRuntime {
     task.pendingPrompt = undefined;
     running.turnId = task.turnId;
     if (running.cancelled || this.closing) {
-      await this.client!.request('turn/interrupt', { threadId: task.threadId, turnId: task.turnId });
-      this.release(running);
+      await this.interruptRunning(running);
       return;
     }
     if (this.running === running) { this.event(task.id, 'task', 'Codex started in the isolated worktree.'); await this.publish(); }
@@ -339,14 +338,7 @@ export class CodexRuntime {
         try { this.client?.respond(approval.wireId, { decision: 'cancel' }); } catch { /* Already resolved by the server. */ }
       }
       if (running.threadId && running.turnId) {
-        try { await this.client!.request('turn/interrupt', { threadId: running.threadId, turnId: running.turnId }); }
-        catch (cause) { this.event(id, 'error', `Interrupt failed; disconnecting the worker: ${message(cause)}`); await this.client?.close(); this.state.codex = { ...emptyStatus(), state: 'error', message: 'The worker was disconnected after interruption failed. Reconnect before continuing.' }; this.state.paused = true; this.release(running); }
-        if (!running.starting && this.running === running) {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const ended = await Promise.race([running.finished.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000); })]);
-          if (timer) clearTimeout(timer);
-          if (!ended) { await this.client?.close(); this.state.codex = { ...emptyStatus(), state: 'error', message: 'Codex did not confirm interruption. The worker was disconnected; reconnect to continue.' }; this.state.paused = true; this.release(running); }
-        }
+        await this.interruptRunning(running);
       }
     }
     this.clearApprovals(id); task.pendingPrompt = undefined;
@@ -355,6 +347,28 @@ export class CodexRuntime {
     await this.publish();
     this.drain();
     return this.getSnapshot();
+  }
+  private async interruptRunning(running: Running): Promise<void> {
+    if (this.running !== running || !running.threadId || !running.turnId) return;
+    try { await this.client!.request('turn/interrupt', { threadId: running.threadId, turnId: running.turnId }); }
+    catch (cause) {
+      if (this.running !== running) return;
+      this.event(running.taskId, 'error', `Interrupt failed; disconnecting the worker: ${message(cause)}`);
+      this.state.paused = true;
+      await this.client?.close();
+      this.state.codex = { ...emptyStatus(), state: 'error', message: 'The worker was disconnected after interruption failed. Reconnect before continuing.' };
+      this.release(running); return;
+    }
+    if (this.running !== running) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ended = await Promise.race([running.finished.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000); })]);
+    if (timer) clearTimeout(timer);
+    if (!ended && this.running === running) {
+      this.state.paused = true;
+      await this.client?.close();
+      this.state.codex = { ...emptyStatus(), state: 'error', message: 'Codex did not confirm interruption. The worker was disconnected; reconnect to continue.' };
+      this.release(running);
+    }
   }
   async inspectTask(id: string): Promise<WorktreeInspection> {
     const task = this.task(id);

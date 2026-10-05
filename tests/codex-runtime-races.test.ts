@@ -135,6 +135,73 @@ describe('CodexRuntime lifecycle race regression checks', () => {
     await runtime.close();
   });
 
+  it('holds the next task until completion when cancelling before the turn/start reply arrives', async () => {
+    const { runtime, client, service } = fixture();
+    const firstStarted = deferred<void>();
+    const firstStartReply = deferred<{ turn: { id: string } }>();
+    const firstStartReturned = deferred<void>();
+    const interruptRequested = deferred<void>();
+    const interruptReply = deferred<Record<string, never>>();
+    const interruptReturned = deferred<void>();
+    const firstTurnId = 'turn-before-reply';
+    let starts = 0;
+    const request = client.request.bind(client);
+    vi.spyOn(client, 'request').mockImplementation(async (method, params: any): Promise<any> => {
+      if (method === 'turn/start') {
+        client.requests.push({ method, params: structuredClone(params) });
+        starts++;
+        const id = starts === 1 ? firstTurnId : 'turn-next-task';
+        client.turnId = id;
+        client.notify('turn/started', { threadId: client.threadId, turn: { id } });
+        if (starts === 1) {
+          firstStarted.resolve();
+          const response = await firstStartReply.promise;
+          firstStartReturned.resolve();
+          return response;
+        }
+        return { turn: { id } };
+      }
+      if (method === 'turn/interrupt' && params.turnId === firstTurnId) {
+        client.requests.push({ method, params: structuredClone(params) });
+        interruptRequested.resolve();
+        const response = await interruptReply.promise;
+        interruptReturned.resolve();
+        return response;
+      }
+      return request(method, params);
+    });
+    await connect(runtime);
+    runtime.setPaused(false);
+    await runtime.submitTask('The first turn has started but its reply is delayed');
+    await firstStarted.promise;
+    const firstTask = runtime.getSnapshot().tasks[0];
+    expect(firstTask.turnId).toBe(firstTurnId);
+    await runtime.submitTask('The second task must wait for confirmed interruption');
+    let cancelled = false;
+    const cancellation = runtime.cancelTask(firstTask.id).then(() => { cancelled = true; });
+    await interruptRequested.promise;
+    // Deliver the delayed turn/start response during cancellation. An interrupt
+    // acknowledgement alone must not release ownership of the still-running turn.
+    firstStartReply.resolve({ turn: { id: firstTurnId } });
+    interruptReply.resolve({});
+    await Promise.all([firstStartReturned.promise, interruptReturned.promise]);
+    for (let continuation = 0; continuation < 100; continuation++) await Promise.resolve();
+    try {
+      expect(cancelled).toBe(false);
+      expect(runtime.isBusy).toBe(true);
+      expect(runtime.getSnapshot().tasks[1].status).toBe('queued');
+      expect(client.requests.filter(item => item.method === 'turn/start')).toHaveLength(1);
+      expect(service.create).toHaveBeenCalledOnce();
+    } finally {
+      client.notify('turn/completed', { threadId: client.threadId, turn: { id: firstTurnId, status: 'interrupted' } });
+      await cancellation;
+    }
+    await settleUntil(() => client.requests.filter(item => item.method === 'turn/start').length === 2);
+    expect(runtime.getSnapshot().tasks[0].status).toBe('cancelled');
+    expect(service.create).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
   it('removes approvals resolved by the server and rejects stale UI responses', async () => {
     const { runtime, client } = fixture();
     await start(runtime, client);

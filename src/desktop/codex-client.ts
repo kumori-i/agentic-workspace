@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import type { CodexModel, CodexStatus } from '../shared/types';
@@ -8,6 +9,7 @@ export type CodexRequestId = string | number;
 
 /** The small process surface also permits a protocol fixture, without launching a model. */
 export interface CodexProcess extends EventEmitter {
+  pid?: number;
   stdin: Writable;
   stdout: Readable;
   stderr: Readable;
@@ -18,6 +20,7 @@ export interface CodexSpawnOptions {
   env: NodeJS.ProcessEnv;
   windowsHide: boolean;
   shell: false;
+  detached: boolean;
   stdio: ['pipe', 'pipe', 'pipe'];
 }
 
@@ -27,6 +30,8 @@ export interface CodexClientOptions {
   maxBufferBytes?: number;
   closeTimeoutMs?: number;
   startupTimeoutMs?: number;
+  /** Test seam: receives only a negative, validated group id owned by this client. */
+  processGroupSignal?: (groupId: number, signal: NodeJS.Signals) => void;
 }
 
 type NotificationListener = (method: string, params: unknown) => void;
@@ -36,6 +41,7 @@ type PendingRequest = {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+type OwnedProcess = { pid?: number; closed: boolean; cleanup?: Promise<void> };
 
 const APPROVAL_METHODS = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval']);
 const initialStatus = (): CodexStatus => ({
@@ -82,6 +88,9 @@ export class CodexClient {
   private exits = new Set<(error: Error) => void>();
   private status = initialStatus();
   private connecting: Promise<CodexStatus> | null = null;
+  private readonly owned = new WeakMap<CodexProcess, OwnedProcess>();
+  private readonly cleanups = new Set<Promise<void>>();
+  private readonly processGroupSignal: NonNullable<CodexClientOptions['processGroupSignal']>;
 
   constructor(private readonly executable = 'codex', options: CodexClientOptions = {}) {
     this.factory = options.processFactory ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
@@ -89,6 +98,7 @@ export class CodexClient {
     this.maxBufferBytes = options.maxBufferBytes ?? 2 * 1024 * 1024;
     this.closeTimeoutMs = options.closeTimeoutMs ?? 1500;
     this.startupTimeoutMs = options.startupTimeoutMs ?? options.requestTimeoutMs ?? 90_000;
+    this.processGroupSignal = options.processGroupSignal ?? ((groupId, signal) => { globalThis.process.kill(groupId, signal); });
   }
 
   getStatus(): CodexStatus { return structuredClone(this.status); }
@@ -139,7 +149,11 @@ export class CodexClient {
       this.decoder = new StringDecoder('utf8');
       this.buffer = '';
       const process = this.factory(this.executable, ['app-server'], {
-        env: codexEnvironment(globalThis.process.env), windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'],
+        env: codexEnvironment(globalThis.process.env), windowsHide: true, shell: false,
+        detached: globalThis.process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      this.owned.set(process, {
+        ...(Number.isSafeInteger(process.pid) && process.pid! > 1 ? { pid: process.pid } : {}), closed: false,
       });
       this.process = process;
       process.stdout.on('data', (chunk: Buffer | string) => {
@@ -158,7 +172,11 @@ export class CodexClient {
         this.fail(process, failure);
       });
       process.on('exit', () => this.fail(process, new Error('Codex exited. Reconnect before resuming work.')));
-      process.on('close', () => this.fail(process, new Error('Codex closed its connection. Reconnect before resuming work.')));
+      process.on('close', () => {
+        const owned = this.owned.get(process);
+        if (owned) owned.closed = true;
+        this.fail(process, new Error('Codex closed its connection. Reconnect before resuming work.'));
+      });
       const initialized = await this.sendRequest('initialize', {
         clientInfo: { name: 'agentic_workspace', title: 'Agentic Workspace', version: '0.2.0' },
         capabilities: { experimentalApi: false },
@@ -335,14 +353,7 @@ export class CodexClient {
     this.buffer = '';
     this.rejectPending(error);
     this.status = { ...initialStatus(), state: 'error', message: error.message };
-    const escalation = setTimeout(() => {
-      try { process.kill('SIGKILL'); } catch { /* Already exited. */ }
-    }, this.closeTimeoutMs);
-    escalation.unref();
-    const finished = () => clearTimeout(escalation);
-    process.once('close', finished);
-    process.once('exit', finished);
-    try { process.stdin.end(); process.kill(); } catch { finished(); }
+    void this.cleanupProcess(process);
     for (const listener of this.exits) {
       try { listener(error); } catch { /* One observer cannot hide exit from the others. */ }
     }
@@ -359,14 +370,57 @@ export class CodexClient {
     this.process = null;
     this.buffer = '';
     this.rejectPending(error);
-    if (!process) return;
-    await new Promise<void>(resolve => {
+    if (process) void this.cleanupProcess(process);
+    // An earlier failure may have detached the transport while its children
+    // still own stdout. Closing also waits for those bounded cleanup attempts.
+    await Promise.all([...this.cleanups]);
+  }
+
+  private signalOwnedTree(process: CodexProcess, signal: NodeJS.Signals): void {
+    const pid = this.owned.get(process)?.pid;
+    if (pid !== undefined && globalThis.process.platform !== 'win32') {
+      try { this.processGroupSignal(-pid, signal); } catch { /* The owned group has already gone. */ }
+    } else if (pid !== undefined) {
+      // taskkill's /T includes native descendants of npm's CLI shim. The PID
+      // comes only from our spawned child, never from renderer-supplied data.
+      const executable = join(globalThis.process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+      execFile(executable, ['/PID', String(pid), '/T', '/F'], {
+        shell: false, windowsHide: true, timeout: Math.min(this.closeTimeoutMs, 1000), maxBuffer: 16 * 1024,
+      }, error => {
+        if (error) { try { process.kill('SIGKILL'); } catch { /* Already exited. */ } }
+      });
+    } else {
+      // Protocol fixtures have no OS PID; they cannot signal another process.
+      try { process.kill(signal); } catch { /* Already exited. */ }
+    }
+  }
+
+  private cleanupProcess(process: CodexProcess): Promise<void> {
+    const owned = this.owned.get(process);
+    if (!owned || owned.closed) return Promise.resolve();
+    if (owned.cleanup) return owned.cleanup;
+    const cleanup = new Promise<void>(resolve => {
       let finished = false;
-      const finish = () => { if (!finished) { finished = true; clearTimeout(timer); resolve(); } };
-      const timer = setTimeout(() => { try { process.kill('SIGKILL'); } catch { /* Already exited. */ } finish(); }, this.closeTimeoutMs);
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        process.removeListener('close', finish);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.signalOwnedTree(process, 'SIGKILL');
+        finish();
+      }, this.closeTimeoutMs);
+      // A shim's exit does not mean its native child has released stdio. Only
+      // close drains the tree; otherwise the owned group receives escalation.
       process.once('close', finish);
-      process.once('exit', finish);
-      try { process.stdin.end(); process.kill(); } catch { finish(); }
+      try { process.stdin.end(); } catch { /* Continue killing the owned tree. */ }
+      this.signalOwnedTree(process, 'SIGTERM');
     });
+    owned.cleanup = cleanup;
+    this.cleanups.add(cleanup);
+    void cleanup.then(() => this.cleanups.delete(cleanup));
+    return cleanup;
   }
 }
