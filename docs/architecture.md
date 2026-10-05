@@ -1,25 +1,41 @@
 # Desktop architecture
 
-Electron owns the window and local workspace. Its main process hosts a deterministic simulated task engine and persists state as validated JSON, using a write-to-temporary-file followed by atomic replacement. The preview uses JSON to avoid adding a native database dependency before the schema stabilizes. SQLite remains an option for the real runtime's task/event history.
+Electron owns the window, filesystem, Git commands, and Codex child process. React presents serializable snapshots; Phaser translates agent states into destinations and animations. Rendering never advances tasks or makes model calls.
 
-The renderer receives a snapshot through a narrow preload bridge. React presents tasks and agents; Phaser translates agent statuses into destinations, movement, and animation. The world has no model calls and cannot advance the workflow.
+## Two runtimes
 
-## Simulation lifecycle
+`WorkspaceEngine` remains a deterministic, credential-free simulation. Its manager plans, frontend/backend jobs run concurrently, QA waits for both, and human review releases the next task. Pausing freezes simulated time.
 
-One top-level task is active at a time. Others queue until the active task is approved or cancelled. The manager plans for two simulated seconds. Frontend and backend jobs then run concurrently for six and eight seconds; QA runs for four seconds after both complete. Human review waits indefinitely. Requesting changes starts another iteration; approval completes the simulation and releases the next queued task.
+`CodexRuntime` hosts one real developer. It creates an isolated worktree, creates or resumes a Codex thread, starts a turn, normalizes streamed items, routes approvals, and waits for actual turn completion before human review. It uses phase labels; no simulated testing or model percentage is presented as real. Other office workers stay idle until independent live roles are implemented.
 
-Pause freezes workflow progress. Restored in-progress tasks start paused so work never silently advances while the app is closed. Approving or cancelling an existing task is still an explicit human action. Progress reaches 100% only after approval.
+Live mode's Hold queue prevents new launches without suspending the active turn. Review blocks subsequent tasks until the user marks it reviewed, requests changes, or cancels it. Failed and interrupted turns hold the queue. Revisions reuse the retained thread and worktree. Cancellation interrupts Codex while retaining files. Configuration cannot change during an active launch or turn, and queued tasks prevent repository retargeting.
 
-The engine bounds retained task/event history. Idle avatars animate locally but consume no model inference. Snapshot copies prevent the renderer from mutating engine state.
+## Codex protocol
+
+`CodexClient` launches an installed CLI with `spawn`, `shell: false`, and JSONL stdio. It negotiates initialization, requests `account/read`, and reads the paginated model catalog. Only managed ChatGPT authentication is accepted; API credential environment variables are omitted. Auth files and account email never enter app state. Credentials remain owned by Codex.
+
+Thread configuration explicitly selects the OpenAI provider, `workspace-write`, user-reviewed `on-request` approvals, and the task worktree. Turns set the writable root to that worktree and disable network access. Command/file approval requests reach the user; unsupported interactions receive an explicit refusal and Activity entry. The app does not automatically approve requests.
+
+Requests have bounded timeouts; thread startup has a longer initialization allowance. UTF-8 JSONL parsing has bounded buffers. Death, malformed protocol, changed authentication, and ambiguous timeout reject pending requests and terminate the transport. Cleanup covers the owned process group on POSIX and uses a bounded native process-tree operation on Windows; wrapper exit alone cannot suppress escalation while descendants retain stdio. Thread/turn identity checks ignore unrelated notifications. Cancellation waits for actual turn completion or disconnects the worker before queued work can launch. Actual messages, command output/exit codes, and file-change status are retained as bounded local events. Process stderr is drained without exposing authentication diagnostics.
+
+## Git worktrees
+
+`GitWorktreeService` uses native Git argument arrays without a shell. A committed HEAD is required. Task worktrees live under the app's local data directory on unique `agentic/task-…` branches. Source checkout changes and ignored dependencies remain in the source checkout. Git hooks, filesystem monitors, external diff commands, and text conversion are disabled for app-owned Git operations.
+
+Before inspection, the service verifies the canonical managed directory, worktree registry, branch, common Git directory, and base commit. Diffs include committed and uncommitted tracked changes against the recorded base, plus bounded untracked text. Binary and symlink contents are omitted. Review output reports truncation. The native folder opener accepts only validated task ownership metadata.
+
+Mark reviewed records a decision and leaves the branch intact. The app never automatically merges, pushes, fetches, resets, or removes worktrees.
+
+## Persistence and restart
+
+Simulation and live history use separate validated JSON files in Electron's application-data directory. Files are written with private permissions through a temporary file, fsync, and atomic replacement. State is bounded and normalized to known fields; pending approvals are never restored.
+
+Live ownership metadata is saved before model execution. Shutdown waits for an in-flight worktree checkpoint and closes the child before the final save. Restoring live history disconnects Codex, holds the queue, and converts unfinished active runs to interrupted. Resume requires an explicit user action. Clearing live history retains worktree folders and branches but removes their UI links.
 
 ## Desktop boundary
 
-Production assets load through the secure `workspace://app` protocol, confined to the built renderer directory. The renderer is sandboxed with Node integration disabled and context isolation enabled. IPC validates the invoking frame and arguments. New windows, permissions, arbitrary navigation, and webviews are blocked.
+Production assets load from the confined `workspace://app` protocol. The renderer has sandboxing and context isolation enabled and Node integration disabled. Every IPC operation checks the exact main frame, sender, and arguments. Native pickers select projects and executables; renderer-supplied paths cannot launch programs or open arbitrary folders. Arbitrary navigation, new windows, webviews, and renderer permissions are blocked.
 
-Project selection uses a native folder picker. In this milestone, the project path is metadata only. The app does not inspect, execute, or edit the selected project.
+## Verification
 
-## Runtime extension
-
-The future runtime should produce normalized events: task planning, worker started, message received, tool activity, approval required, turn completed, and failure. Mechanical orchestration belongs in code; reasoning belongs in Codex threads. The simulated runtime should remain usable for testing the office without inference.
-
-Credentials belong to the local trusted runtime, never React state, project files, or logs. Starting real work must explicitly target a selected repository and isolated Git worktree. Reviews must come from independent task context rather than the implementation worker's private transcript.
+Protocol fixtures cover message framing, auth rejection, approvals, process death, and timeouts without model usage. Real temporary Git repositories cover worktree ownership and file isolation. Runtime fixtures cover durable checkpoints, review/revisions, failure, interruption, and restart. The Electron smoke check verifies the actual desktop UI and disconnected-mode controls in Linux CI. Physical macOS and Windows checks remain release work.

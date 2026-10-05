@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute } from 'node:path';
-import type { ActivityEvent, Agent, Job, Task, WorkspaceSnapshot } from '../shared/types';
+import type { ActivityEvent, Agent, CodexStatus, Job, Task, WorktreeInfo, WorkspaceSnapshot } from '../shared/types';
 
 const agentIds = new Set(['manager', 'frontend', 'backend', 'qa']);
-const agentStatuses = new Set(['idle', 'planning', 'working', 'waiting', 'review']);
-const taskStatuses = new Set(['queued', 'planning', 'working', 'testing', 'review', 'completed', 'cancelled']);
-const jobStatuses = new Set(['pending', 'running', 'completed']);
-const eventKinds = new Set(['system', 'message', 'task', 'review']);
+const agentStatuses = new Set(['idle', 'planning', 'working', 'waiting', 'review', 'blocked', 'error']);
+const taskStatuses = new Set(['queued', 'planning', 'working', 'testing', 'review', 'completed', 'cancelled', 'blocked', 'failed', 'interrupted']);
+const jobStatuses = new Set(['pending', 'running', 'completed', 'failed', 'cancelled']);
+const eventKinds = new Set(['system', 'message', 'task', 'review', 'tool', 'error']);
+const codexStates = new Set(['disconnected', 'connecting', 'ready', 'needs-auth', 'unavailable', 'error']);
 const MAX_STATE_BYTES = 5 * 1024 * 1024;
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -34,6 +35,30 @@ function nullableId(value: unknown): value is string | null {
   return value === null || id(value);
 }
 
+function absolutePath(value: unknown): value is string {
+  return text(value, 4096) && isAbsolute(value) && !value.includes('\0');
+}
+
+function opaqueId(value: unknown): value is string {
+  return text(value, 256) && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function validWorktree(value: unknown): value is WorktreeInfo {
+  return record(value) && absolutePath(value.path) && absolutePath(value.repositoryPath) &&
+    text(value.branch, 300) && !/[\u0000-\u001f\u007f]/.test(value.branch) &&
+    typeof value.baseCommit === 'string' && /^[a-fA-F0-9]{40,64}$/.test(value.baseCommit) && timestamp(value.createdAt);
+}
+
+function validCodexStatus(value: unknown): value is CodexStatus {
+  return record(value) && codexStates.has(value.state as string) && ['chatgpt', 'none', 'other'].includes(value.auth as string) &&
+    text(value.message, 4000, true) && Array.isArray(value.models) && value.models.length <= 100 &&
+    value.models.every(model => record(model) && opaqueId(model.id) && text(model.model, 200) &&
+      text(model.displayName, 500) && typeof model.isDefault === 'boolean') &&
+    new Set(value.models.map(model => model.id)).size === value.models.length &&
+    (value.selectedModel === null || text(value.selectedModel, 200)) &&
+    (value.version === undefined || text(value.version, 200)) && (value.plan === undefined || text(value.plan, 100));
+}
+
 function validAgent(value: unknown): value is Agent {
   return record(value) && agentIds.has(value.id as string) && text(value.name, 100) &&
     text(value.role, 100) && text(value.department, 100) &&
@@ -53,7 +78,14 @@ function validTask(value: unknown): value is Task {
     !taskStatuses.has(value.status as string) || !progress(value.progress) ||
     !timestamp(value.createdAt) || !timestamp(value.updatedAt) ||
     !Number.isSafeInteger(value.iteration) || (value.iteration as number) < 1 || !Array.isArray(value.jobs) ||
-    value.jobs.length > 16 || !value.jobs.every(validJob)) return false;
+    value.jobs.length > 16 || !value.jobs.every(validJob) ||
+    (value.runtime !== undefined && value.runtime !== 'simulation' && value.runtime !== 'codex') ||
+    (value.worktree !== undefined && !validWorktree(value.worktree)) ||
+    (value.threadId !== undefined && !opaqueId(value.threadId)) ||
+    (value.turnId !== undefined && !opaqueId(value.turnId)) ||
+    (value.model !== undefined && !text(value.model, 200)) ||
+    (value.error !== undefined && !text(value.error, 4000, true)) ||
+    (value.pendingPrompt !== undefined && !text(value.pendingPrompt, 2000))) return false;
   const ids = new Set(value.jobs.map(job => job.id));
   return ids.size === value.jobs.length && value.jobs.every(job => job.dependsOn.every(dependency => ids.has(dependency)));
 }
@@ -61,14 +93,16 @@ function validTask(value: unknown): value is Task {
 function validEvent(value: unknown): value is ActivityEvent {
   return record(value) && id(value.id) && timestamp(value.timestamp) &&
     (value.agentId === null || agentIds.has(value.agentId as string)) && nullableId(value.taskId) &&
-    eventKinds.has(value.kind as string) && text(value.message, 4000);
+    eventKinds.has(value.kind as string) && text(value.message, 4000, true) &&
+    (value.itemId === undefined || opaqueId(value.itemId));
 }
 
 /** Treat persisted JSON as untrusted input; return only the known schema fields. */
 export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
-  if (!record(value) || value.schemaVersion !== 1 || value.mode !== 'simulation' ||
+  if (!record(value) || value.schemaVersion !== 1 || !['simulation', 'codex'].includes(value.mode as string) ||
     typeof value.paused !== 'boolean' ||
-    !(value.projectPath === null || (text(value.projectPath, 4096) && isAbsolute(value.projectPath) && !value.projectPath.includes('\0'))) ||
+    !(value.projectPath === null || absolutePath(value.projectPath)) ||
+    (value.codex !== undefined && !validCodexStatus(value.codex)) ||
     !Array.isArray(value.agents) || value.agents.length !== 4 || !value.agents.every(validAgent) ||
     new Set(value.agents.map(agent => agent.id)).size !== 4 ||
     !Array.isArray(value.tasks) || value.tasks.length > 500 || !value.tasks.every(validTask) ||
@@ -77,11 +111,14 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
     new Set(value.events.map(event => event.id)).size !== value.events.length) return null;
 
   const taskIds = new Set(value.tasks.map(task => task.id));
-  if (value.agents.some(agent => agent.taskId !== null && !taskIds.has(agent.taskId))) return null;
+  if (value.agents.some(agent => agent.taskId !== null && !taskIds.has(agent.taskId)) ||
+    value.tasks.some(task => task.runtime !== undefined && task.runtime !== value.mode) ||
+    (value.mode === 'codex' && value.tasks.some(task => task.jobs.length !== 1 ||
+      task.jobs[0].agentId !== 'backend' || task.jobs[0].dependsOn.length !== 0))) return null;
 
   return {
     schemaVersion: 1,
-    mode: 'simulation',
+    mode: value.mode as WorkspaceSnapshot['mode'],
     projectPath: value.projectPath,
     paused: value.paused,
     agents: value.agents.map(agent => ({
@@ -95,11 +132,29 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
         id: job.id, agentId: job.agentId, title: job.title, status: job.status,
         progress: job.progress, dependsOn: [...job.dependsOn],
       })),
+      ...(task.runtime === undefined ? {} : { runtime: task.runtime }),
+      ...(task.worktree === undefined ? {} : { worktree: {
+        path: task.worktree.path, branch: task.worktree.branch, repositoryPath: task.worktree.repositoryPath,
+        baseCommit: task.worktree.baseCommit, createdAt: task.worktree.createdAt,
+      } }),
+      ...(task.threadId === undefined ? {} : { threadId: task.threadId }),
+      ...(task.turnId === undefined ? {} : { turnId: task.turnId }),
+      ...(task.model === undefined ? {} : { model: task.model }),
+      ...(task.error === undefined ? {} : { error: task.error }),
+      ...(task.pendingPrompt === undefined ? {} : { pendingPrompt: task.pendingPrompt }),
     })),
     events: value.events.map(event => ({
       id: event.id, timestamp: event.timestamp, agentId: event.agentId,
       taskId: event.taskId, kind: event.kind, message: event.message,
+      ...(event.itemId === undefined ? {} : { itemId: event.itemId }),
     })),
+    ...(value.codex === undefined ? {} : { codex: {
+      state: value.codex.state, auth: value.codex.auth, message: value.codex.message,
+      models: value.codex.models.map(model => ({ id: model.id, model: model.model, displayName: model.displayName, isDefault: model.isDefault })),
+      selectedModel: value.codex.selectedModel,
+      ...(value.codex.version === undefined ? {} : { version: value.codex.version }),
+      ...(value.codex.plan === undefined ? {} : { plan: value.codex.plan }),
+    } }),
   };
 }
 
