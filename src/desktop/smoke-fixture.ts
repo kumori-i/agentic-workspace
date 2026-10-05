@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import type { CodexStatus } from '../shared/types';
@@ -7,6 +7,11 @@ import type { RuntimeClient } from './codex-runtime';
 
 const execute = promisify(execFile);
 const updatedReadme = '# Smoke project\nRuns locally.\n';
+function fixtureEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) if (key.startsWith('GIT_')) delete environment[key];
+  environment.GIT_TERMINAL_PROMPT = '0'; return environment;
+}
 const status: CodexStatus = { state: 'ready', auth: 'chatgpt', message: 'Desktop smoke fixture; no authentication or model inference.', models: [{ id: 'smoke-fixture', model: 'smoke-fixture', displayName: 'Smoke fixture (no inference)', isDefault: true }], selectedModel: 'smoke-fixture' };
 
 /** Used only with --smoke-test and a newly created disposable repository. */
@@ -18,12 +23,15 @@ class SmokeClient implements RuntimeClient {
   private pending = new Set<Promise<void>>();
   private sequence = 0;
   private closed = false;
-  constructor(private readonly worktreeRoot: string) {}
+  constructor(private readonly worktreeRoot: string, private readonly fixtureRepository: string) {}
   connect = async () => structuredClone(status);
   async request<T>(method: string, params: any): Promise<T> {
     if (method === 'thread/start') {
       // A fixture can never edit a user-selected project or arbitrary folder.
-      if (dirname(params.cwd) !== this.worktreeRoot || relative(this.worktreeRoot, params.cwd).startsWith('..')) throw new Error('Smoke fixture rejected a non-fixture worktree.');
+      const root = await realpath(this.worktreeRoot); const cwd = await realpath(params.cwd);
+      if (dirname(cwd) !== root || relative(root, cwd).startsWith('..')) throw new Error('Smoke fixture rejected a non-fixture worktree.');
+      const common = await execute('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { timeout: 10_000, env: fixtureEnvironment() });
+      if (await realpath(common.stdout.trim()) !== await realpath(join(this.fixtureRepository, '.git'))) throw new Error('Smoke fixture rejected a non-fixture Git repository.');
       const id = `smoke-thread-${++this.sequence}`;
       this.threads.set(id, { cwd: params.cwd, review: params.sandbox === 'read-only' });
       return { thread: { id } } as T;
@@ -74,7 +82,7 @@ export async function createSmokeFixture(dataPath: string): Promise<{ repository
   const root = join(dataPath, 'disposable-smoke');
   await mkdir(root, { recursive: true });
   const repository = join(root, 'project'); const remote = join(root, 'remote.git');
-  const git = async (...args: string[]) => { await execute('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], { cwd: root, timeout: 10_000 }); };
+  const git = async (...args: string[]) => { await execute('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], { cwd: root, timeout: 10_000, env: fixtureEnvironment() }); };
   await git('init', '-b', 'main', repository);
   await git('-C', repository, 'config', 'user.email', 'smoke@example.invalid');
   await git('-C', repository, 'config', 'user.name', 'Desktop smoke fixture');
@@ -83,5 +91,5 @@ export async function createSmokeFixture(dataPath: string): Promise<{ repository
   await git('init', '--bare', remote);
   await git('-C', repository, 'remote', 'add', 'origin', remote);
   await git('-C', repository, 'push', 'origin', 'main');
-  return { repository, remote, clientFactory: () => new SmokeClient(join(dataPath, 'worktrees')) };
+  return { repository, remote, clientFactory: () => new SmokeClient(join(dataPath, 'worktrees'), repository) };
 }

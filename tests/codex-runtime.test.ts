@@ -157,6 +157,7 @@ describe('live runtime with real Git and a fixture Codex server', () => {
     expect(client.requests.some(request => request.method === 'thread/resume')).toBe(true);
     client.finish();
     await completeReview();
+    expect(client.requests.filter(request => request.method === 'turn/start').at(-1)!.params.input[0].text).toContain('Latest requested revision: Correct the edge case.');
   });
 
   it('ignores stale turn completions and holds the queue after a real failure', async () => {

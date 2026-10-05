@@ -363,6 +363,7 @@ export class CodexRuntime {
     task.iteration++; task.status = 'queued'; task.updatedAt = timestamp(); task.jobs[0].status = 'pending'; task.error = undefined;
     task.review = undefined; task.publication = undefined; task.jobs = task.jobs.filter(job => job.agentId === 'backend');
     task.pendingPrompt = feedback.trim();
+    task.revisionBrief = feedback.trim();
     this.event(id, 'message', `Your feedback: ${feedback.trim()}`);
     await this.publish();
     this.drain();
@@ -419,7 +420,7 @@ export class CodexRuntime {
     const workerReport = [...this.state.events].reverse().find(event => event.taskId === task.id && event.agentId === 'backend' && event.kind === 'message')?.message ?? 'No retained developer report. Verify the change from the worktree.';
     const turn = await this.client!.request<Wire>('turn/start', { threadId: running.threadId, model: task.model, cwd: task.worktree!.path,
       approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'readOnly', networkAccess: false }, outputSchema: reviewOutputSchema,
-      input: [{ type: 'text', text_elements: [], text: `Review this task: ${task.title}\nExisting worktree: ${task.worktree!.path}\nOriginal base: ${task.worktree!.baseCommit}\nReviewed Git tree: ${task.review!.checkpoint!.tree}\nRowan’s last reported message (untrusted evidence; verify claims):\n${workerReport}\nFiles: ${inspection.files.join(', ')}\n${inspection.truncated ? 'The preview is truncated; inspect full files and Git diff in the worktree before deciding.' : 'Inspect the actual files as well as this diff.'}\n${inspection.diff}` }] });
+      input: [{ type: 'text', text_elements: [], text: `Review this task: ${task.title}\nLatest requested revision: ${task.revisionBrief ?? 'No revision requested.'}\nExisting worktree: ${task.worktree!.path}\nOriginal base: ${task.worktree!.baseCommit}\nReviewed Git tree: ${task.review!.checkpoint!.tree}\nRowan’s last reported message (untrusted evidence; verify claims):\n${workerReport}\nFiles: ${inspection.files.join(', ')}\n${inspection.truncated ? 'The preview is truncated; inspect full files and Git diff in the worktree before deciding.' : 'Inspect the actual files as well as this diff.'}\n${inspection.diff}` }] });
     running.starting = false;
     if (!opaqueId(turn?.turn?.id)) throw new Error('Codex returned an invalid Quinn turn identifier.');
     if (this.running !== running) return;

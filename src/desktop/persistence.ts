@@ -108,7 +108,8 @@ function validTask(value: unknown): value is Task {
     (value.model !== undefined && !text(value.model, 200)) ||
     (value.error !== undefined && !text(value.error, 4000, true)) ||
     (value.review !== undefined && !validReview(value.review)) || (value.publication !== undefined && !validPublication(value.publication)) ||
-    (value.pendingPrompt !== undefined && !text(value.pendingPrompt, 2000))) return false;
+    (value.pendingPrompt !== undefined && !text(value.pendingPrompt, 2000)) ||
+    (value.revisionBrief !== undefined && !text(value.revisionBrief, 2000))) return false;
   const ids = new Set(value.jobs.map(job => job.id));
   return ids.size === value.jobs.length && value.jobs.every(job => job.dependsOn.every(dependency => ids.has(dependency)));
 }
@@ -171,6 +172,7 @@ export function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null
       ...(task.model === undefined ? {} : { model: task.model }),
       ...(task.error === undefined ? {} : { error: task.error }),
       ...(task.pendingPrompt === undefined ? {} : { pendingPrompt: task.pendingPrompt }),
+      ...(task.revisionBrief === undefined ? {} : { revisionBrief: task.revisionBrief }),
       ...(task.review === undefined ? {} : { review: {
         status: task.review.status, summary: task.review.summary, findings: [...task.review.findings], checks: [...task.review.checks],
         ...(task.review.checkpoint ? { checkpoint: { tree: task.review.checkpoint.tree, head: task.review.checkpoint.head } } : {}),

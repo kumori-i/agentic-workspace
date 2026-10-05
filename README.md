@@ -61,6 +61,8 @@ Selecting Quinn or Mira acts on the **selected existing task**. It does not crea
 
 Confirmation stops if reviewed files, the target branch, target commit, or remote destination changed. A conflict leaves the original checkout untouched and retains Rowan’s commit; resolve the task branch and ask Quinn to review again. A failed push retains the local merge. **Resume Git handoff with Mira** retries its exact commit without including later unreviewed changes. Interrupted Git handoffs never push automatically on restart. The app never force-pushes, stashes, resets, fetches automatically, or removes task branches.
 
+![Mira confirmation in the desktop smoke fixture, with no model inference](docs/handoff-preview.png)
+
 Worktrees are intentionally retained. Reset clears the selected mode's task history, including its worktree links, while leaving Git branches and folders on disk. Copy any paths you need before clearing live history. You can also open the retained worktree and use your normal Git or pull request workflow.
 
 ## Verify
@@ -72,7 +74,7 @@ npm run smoke
 
 `check` runs TypeScript, simulation, persistence, protocol fixtures, independent review validation, real-Git publication and recovery, and runtime lifecycle checks, followed by the production build. These automated tests never spend model usage. `smoke` boots the desktop app and checks its renderer, pixel canvas, IPC bridge, disconnected controls, simulation lifecycle, and Mira’s actual confirmation UI. A clearly labeled Codex fixture edits and reviews a disposable repository; real Git commits, merges, and pushes to a temporary local bare remote. It never calls a model or publishes to a user remote. Run `npm run build` first if using `smoke` separately. Linux environments without a display can use `xvfb-run -a npm run smoke`; the CI workflow demonstrates this setup.
 
-The v0.3 implementation has 106 automated checks, TypeScript validation, and a production build. Linux CI also runs the Electron smoke check. The preview above was captured from that Electron window. Actual Codex authentication and model discovery were verified against 0.160.0; end-to-end live inference and model review remain unverified because thread startup stalled in this managed development environment. Review orchestration is verified with protocol fixtures, and publication with real disposable Git repositories.
+The v0.3 implementation has 107 automated checks, TypeScript validation, and a production build. The Linux Electron smoke check passes the actual confirmation flow with independent review fixtures and a real commit, merge, and push to a disposable remote. The preview above was captured from that Electron window. Actual Codex authentication and model discovery were verified against 0.160.0; end-to-end live inference and model review remain unverified because thread startup stalled in this managed development environment. Review orchestration is verified with protocol fixtures, and publication with real disposable Git repositories.
 
 ## Package
 

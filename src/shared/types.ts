@@ -114,6 +114,7 @@ export interface Task {
   model?: string;
   error?: string;
   pendingPrompt?: string;
+  revisionBrief?: string;
   review?: TaskReview;
   publication?: TaskPublication;
 }

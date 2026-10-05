@@ -22,6 +22,7 @@ function liveSnapshot(directory: string): WorkspaceSnapshot {
     ...snapshot.tasks[0], runtime: 'codex', status: 'interrupted',
     threadId: 'thread:001', turnId: 'turn-001', model: 'gpt-a', error: 'Interrupted on close.',
     pendingPrompt: 'Continue with the requested revision.',
+    revisionBrief: 'Continue with the requested revision.',
     worktree: { path: join(directory, 'task-worktree'), repositoryPath: directory,
       branch: 'codex/task-001', baseCommit: 'a'.repeat(40), createdAt: new Date().toISOString() },
     jobs: [{ id: 'task-1-codex', agentId: 'backend', title: 'Codex implementation', status: 'cancelled', progress: 0, dependsOn: [] }],
